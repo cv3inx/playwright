@@ -144,16 +144,13 @@ async function runScript(code, hint) {
 
   const cpuSec = Math.ceil(TIMEOUT / 1000) + 5;
 
-  // Hardening (per-process, not user-facing limits):
-  //  - umask 077, ulimits to prevent miners / fork bombs / runaway disk
-  //  - setpriv --no-new-privs (block setuid escalation) when available
-  //  - exec via bash -c, child becomes session/pgrp leader (detached:true)
-  //
-  //  Note on -v: chromium's address space allocation is enormous (2-3 TB
-  //  reserved virtually even for headless), so vmem ulimit must be unlimited
-  //  or chromium SIGABRTs at startup. RSS is what actually matters; we cap
-  //  that via -m if needed. -d (data segment) also kept generous.
-  const ulimits = `umask 077; ulimit -t ${cpuSec} -f 102400 -u 500 -n 4096 -c 0`;
+  // Hardening (per-process). Most ulimits unlimited so chromium runs unimpeded;
+  // only the genuine safety bits remain:
+  //   -t cpu seconds  → still bounds runaway CPU (anti-miner, mirrors timeout)
+  //   -c 0           → no core dumps written to disk
+  //   umask 077       → any file the script writes is private to its run
+  // setpriv --no-new-privs (block setuid escalation) when available.
+  const ulimits = `umask 077; ulimit -t ${cpuSec} -c 0`;
   const runner = `${NODE_BIN} ${JSON.stringify(scriptFile)}`;
   const inner = SETPRIV_OK ? `setpriv --no-new-privs -- ${runner}` : runner;
   const wrapped = `${ulimits}; exec ${inner}`;
@@ -390,11 +387,11 @@ function infoPayload() {
       envExposedToChild: ["PATH", "HOME", "TMPDIR", "CWD", "NODE_PATH", "PLAYWRIGHT_BROWSERS_PATH", "LANG"],
       ulimits: {
         cpuSec: "TIMEOUT_MS/1000 + 5",
-        virtualMemKB: 1048576,
-        fileSizeKB: 51200,
-        maxUserProcs: 200,
-        maxOpenFiles: 1024,
         coreDumps: 0,
+        memory: "unlimited (host-wide cgroup is the real limiter)",
+        fileSize: "unlimited",
+        maxUserProcs: "unlimited",
+        maxOpenFiles: "unlimited",
       },
       burnOnComplete: true,
       burnSteps: [
