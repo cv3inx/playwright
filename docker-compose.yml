@@ -1,0 +1,56 @@
+services:
+  playwright-api:
+    build: .
+    container_name: playwright-api
+    restart: unless-stopped
+
+    # Map host port → container port (HF Space uses 7860; on a VPS pick whatever).
+    # If you put nginx/caddy in front, drop the host side and rely on the network.
+    ports:
+      - "${HOST_PORT:-7860}:7860"
+
+    environment:
+      PORT: 7860
+      TIMEOUT_MS: ${TIMEOUT_MS:-1800000}      # 30 minutes per request
+      # Optional CAPTCHA solver — enables stealth.solveTurnstileWithService()
+      TWOCAPTCHA_KEY: ${TWOCAPTCHA_KEY:-}
+      CAPSOLVER_KEY: ${CAPSOLVER_KEY:-}
+
+    # Chromium needs more shared memory than the Docker default (64 MB) or
+    # tabs crash with "Target closed". 2 GB is comfortable for many parallel
+    # browsers; raise it if you run dozens of contexts at once.
+    shm_size: "2gb"
+
+    # ipc:host gives chromium full access to the host's IPC — simplest fix
+    # for /dev/shm pressure on heavy workloads. Comment out if you prefer
+    # full isolation; in that case bump shm_size further.
+    ipc: host
+
+    # Cap container resources so a runaway script can't eat the host.
+    # Tune to your VPS — these are sensible defaults for a 4-core / 8 GB box.
+    deploy:
+      resources:
+        limits:
+          cpus: "${CPU_LIMIT:-4.0}"
+          memory: "${MEM_LIMIT:-8g}"
+
+    # Healthcheck so Docker knows when the container is actually serving.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:7860/health > /dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+    # Persist the per-request workspace dir on a tmpfs — it's wiped per request
+    # anyway and tmpfs avoids touching disk.
+    tmpfs:
+      - /tmp:size=2g,exec
+      - /app/runs:size=512m,exec
+
+    # Logging — keep recent logs but don't fill the disk.
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
