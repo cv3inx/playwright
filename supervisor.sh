@@ -43,8 +43,11 @@ if [ "$BUNDLED_SOLVER" = "1" ]; then
       (
         cd /app/solver
         rm -f /tmp/.X*-lock /tmp/.X11-unix/X* 2>/dev/null || true
+        # stdbuf -oL forces line-buffered stdout so logs flush per line
+        # instead of being held back in sed's pipe buffer.
         PORT="${SOLVER_PORT}" CAMOUFOX_HEADLESS="${CAMOUFOX_HEADLESS:-virtual}" \
-          python3 service.py 2>&1 | sed 's/^/[solver] /'
+        PYTHONUNBUFFERED=1 \
+          stdbuf -oL -eL python3 service.py 2>&1 | stdbuf -oL sed -u 's/^/[solver] /'
       ) &
       SOLVER_PID=$!
     else
@@ -79,7 +82,10 @@ if [ "$SOLVER_READY" = "0" ]; then
 fi
 
 echo "[supervisor] starting playwright-api on :${PORT:-7860}..."
-bun /app/server.js 2>&1 | sed 's/^/[api] /' &
+# No prefix wrapper here — server.js already produces its own pretty,
+# tabular log format. Run bun directly so we don't pipe through sed
+# (which would buffer stdout) or lose ANSI colors.
+bun /app/server.js &
 API_PID=$!
 
 wait -n "$API_PID" ${SOLVER_PID:+$SOLVER_PID} 2>/dev/null
