@@ -12,9 +12,11 @@ services:
     environment:
       PORT: 7860
       TIMEOUT_MS: ${TIMEOUT_MS:-1800000}      # 30 minutes per request
-      # Optional CAPTCHA solver — enables stealth.solveTurnstileWithService()
-      TWOCAPTCHA_KEY: ${TWOCAPTCHA_KEY:-}
-      CAPSOLVER_KEY: ${CAPSOLVER_KEY:-}
+      # Self-hosted CAPTCHA solver — point at an instance of
+      # github.com/cv3inx/turnstile-solver. No third-party API.
+      TURNSTILE_SOLVER_URL: ${TURNSTILE_SOLVER_URL:-}
+      WHISPER_MODEL: ${WHISPER_MODEL:-Xenova/whisper-tiny.en}
+      COOKIES_DIR: /app/cookies
 
     # Chromium needs more shared memory than the Docker default (64 MB) or
     # tabs crash with "Target closed". 2 GB is comfortable for many parallel
@@ -48,9 +50,17 @@ services:
       - /tmp:size=2g,exec
       - /app/runs:size=512m,exec
 
+    # Persist the cookie jar across restarts so we don't have to re-solve CF
+    # for every container boot.
+    volumes:
+      - playwright-cookies:/app/cookies
+
     # Logging — keep recent logs but don't fill the disk.
     logging:
       driver: json-file
       options:
         max-size: "20m"
         max-file: "5"
+
+volumes:
+  playwright-cookies:

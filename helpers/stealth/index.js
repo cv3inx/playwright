@@ -112,6 +112,14 @@ async function context(browser, opts = {}) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const jitter = (min, max) => sleep(min + Math.random() * (max - min));
 
+// Local-only Turnstile / reCAPTCHA solvers (no third-party API).
+// See helpers/captcha/ for the full implementations.
+let _captcha;
+function getCaptcha() {
+  if (!_captcha) _captcha = require('captcha');
+  return _captcha;
+}
+
 // Try to click the Turnstile / "Verify you are human" checkbox if present.
 // Returns true if a click was attempted, false if no checkbox visible.
 //
@@ -180,96 +188,21 @@ async function clickTurnstile(page, opts = {}) {
   return false;
 }
 
-// If TWOCAPTCHA_KEY (or CAPSOLVER_KEY) env var is set on the Space, this hook
-// can be plugged into waitForCloudflare to solve image-CAPTCHAs that show up
-// after the checkbox click. Disabled by default — costs money and requires
-// signup. Implementation skeleton follows the 2captcha API.
-async function solveTurnstileWithService(page, opts = {}) {
-  const apiKey = opts.apiKey || process.env.TWOCAPTCHA_KEY || process.env.CAPSOLVER_KEY;
-  if (!apiKey) return false;
-
-  // Extract sitekey + page URL
-  const sitekey = await page.evaluate(() => {
-    const el = document.querySelector('[data-sitekey], .cf-turnstile[data-sitekey]');
-    return el?.getAttribute('data-sitekey') || null;
-  });
-  if (!sitekey) return false;
-
-  const pageUrl = page.url();
-  const service = opts.service || (process.env.CAPSOLVER_KEY ? 'capsolver' : '2captcha');
-
-  try {
-    if (service === '2captcha') {
-      // Submit job
-      const submit = await fetch(`https://2captcha.com/in.php?key=${apiKey}&method=turnstile&sitekey=${sitekey}&pageurl=${encodeURIComponent(pageUrl)}&json=1`);
-      const sub = await submit.json();
-      if (sub.status !== 1) return false;
-      const jobId = sub.request;
-      // Poll
-      for (let i = 0; i < 40; i++) {
-        await sleep(5000);
-        const r = await fetch(`https://2captcha.com/res.php?key=${apiKey}&action=get&id=${jobId}&json=1`);
-        const j = await r.json();
-        if (j.status === 1) {
-          await page.evaluate((token) => {
-            const el = document.querySelector('input[name="cf-turnstile-response"]');
-            if (el) el.value = token;
-            window.turnstile?.execute?.();
-          }, j.request);
-          return true;
-        }
-      }
-    } else if (service === 'capsolver') {
-      const create = await fetch('https://api.capsolver.com/createTask', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          clientKey: apiKey,
-          task: { type: 'AntiTurnstileTaskProxyLess', websiteURL: pageUrl, websiteKey: sitekey },
-        }),
-      });
-      const cr = await create.json();
-      if (!cr.taskId) return false;
-      for (let i = 0; i < 40; i++) {
-        await sleep(3000);
-        const r = await fetch('https://api.capsolver.com/getTaskResult', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ clientKey: apiKey, taskId: cr.taskId }),
-        });
-        const j = await r.json();
-        if (j.status === 'ready') {
-          await page.evaluate((token) => {
-            const el = document.querySelector('input[name="cf-turnstile-response"]');
-            if (el) el.value = token;
-            window.turnstile?.execute?.();
-          }, j.solution.token);
-          return true;
-        }
-      }
-    }
-  } catch {}
-  return false;
-}
-
 // Wait until the Cloudflare interstitial / Just A Moment page goes away.
 // Resolves true once we see real content, false on timeout.
 //
-// Strategy:
+// Strategy (all local, no third-party API):
 //   1. Detect the interstitial.
-//   2. If a Turnstile checkbox is visible — click it (autoClick=true).
-//   3. If a CAPTCHA solver key is configured — try service-based solve.
-//   4. Poll for content to load.
+//   2. If a Turnstile checkbox is visible — click it with human mouse path.
+//   3. Poll for content to load.
 async function waitForCloudflare(page, opts = {}) {
   const {
     timeout = 60000,
     pollMs = 500,
     autoClick = true,
-    useSolver = !!(process.env.TWOCAPTCHA_KEY || process.env.CAPSOLVER_KEY),
   } = opts;
   const deadline = Date.now() + timeout;
   let clicked = false;
-  let solved = false;
 
   const isCloudflareWall = async () => {
     try {
@@ -298,18 +231,23 @@ async function waitForCloudflare(page, opts = {}) {
     if (!(await isCloudflareWall())) return true;
 
     if (autoClick && !clicked) {
-      const did = await clickTurnstile(page, { timeout: 3000 });
-      if (did) {
-        clicked = true;
-        await sleep(2000); // give CF a moment to validate
-        continue;
+      const captcha = getCaptcha();
+      // 1) If a self-hosted turnstile-solver is configured, ask it for a token
+      //    and inject. Cheapest path — no in-browser interaction needed.
+      if (captcha.turnstileSolverUrl()) {
+        const tokenInjected = await captcha
+          .solveTurnstileViaSelfHosted(page, { timeout: 30000 })
+          .catch(() => false);
+        if (tokenInjected) {
+          await sleep(1500);
+          continue; // re-check the wall predicate
+        }
       }
-    }
-
-    if (useSolver && !solved && clicked) {
-      // Solver only needed if click alone didn't pass
-      const ok = await solveTurnstileWithService(page).catch(() => false);
-      if (ok) solved = true;
+      // 2) Fall back to local human-bezier click + token poll
+      const did = await captcha.solveTurnstile(page, { timeout: 8000 }).catch(() => false);
+      if (did) return true;
+      clicked = true; // don't retry the click loop forever
+      await sleep(2000);
     }
 
     await sleep(pollMs);
@@ -323,11 +261,10 @@ async function gotoBypass(page, url, opts = {}) {
     waitUntil = 'domcontentloaded',
     cfTimeout = 60000,
     autoClick = true,
-    useSolver,
     ...gotoOpts
   } = opts;
   const resp = await page.goto(url, { waitUntil, ...gotoOpts });
-  await waitForCloudflare(page, { timeout: cfTimeout, autoClick, useSolver });
+  await waitForCloudflare(page, { timeout: cfTimeout, autoClick });
   return resp;
 }
 
@@ -339,7 +276,6 @@ module.exports = {
   waitForCloudflare,
   gotoBypass,
   clickTurnstile,
-  solveTurnstileWithService,
   REALISTIC_UA,
   DEFAULT_ARGS,
 };
