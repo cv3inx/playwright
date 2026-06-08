@@ -64,9 +64,11 @@ services:
       retries: 3
       start_period: 30s
 
+    # tmpfs mounts default to root:root,755 which the UID-1000 container user
+    # can't write to. Pin uid/gid to 1000 and 0700 so /app/runs is writable.
     tmpfs:
-      - /tmp:size=2g,exec
-      - /app/runs:size=512m,exec
+      - /tmp:size=2g,exec,uid=1000,gid=1000,mode=1777
+      - /app/runs:size=512m,exec,uid=1000,gid=1000,mode=0700
 
     volumes:
       - playwright-cookies:/app/cookies
