@@ -36,6 +36,21 @@ function checkBlocked(code) {
   return null;
 }
 
+// Pick file extension based on syntax. Node treats `.js` per the nearest
+// package.json `type` field, so we pin it explicitly: .cjs for require,
+// .mjs for import/export. Heuristic; user can hint via body.type.
+function detectExt(code, hint) {
+  if (hint === "esm" || hint === "mjs" || hint === "module") return "mjs";
+  if (hint === "cjs" || hint === "commonjs" || hint === "script") return "cjs";
+  const esmRe = /(^|\n)\s*(import\s+[\w*{},\s]+\s+from\s+['"]|import\s*\(|export\s+(default|const|let|var|function|class|\{))/;
+  const cjsRe = /(require\s*\(|module\.exports|exports\.[A-Za-z_$])/;
+  const isEsm = esmRe.test(code);
+  const isCjs = cjsRe.test(code);
+  if (isEsm && !isCjs) return "mjs";
+  if (isCjs && !isEsm) return "cjs";
+  return "cjs"; // default — covers the original PlaywrightDownloader example
+}
+
 const shim = `
 {
   const __origLog = console.log;
@@ -59,12 +74,17 @@ try {
   SETPRIV_OK = false;
 }
 
-const BUN_BIN_DIR = (() => {
-  // Honor whatever HOME/.bun the build set up — defaults to /home/pwuser
-  const home = Bun.env.HOME || "/home/pwuser";
-  return `${home}/.bun/bin`;
+// User code is run by `node`, not `bun`. Bun + Playwright has known pipe
+// communication issues (chromium child closes before parent connects).
+// `node` ships with the Playwright base image and works flawlessly.
+const NODE_BIN = (() => {
+  try {
+    const out = Bun.spawnSync(["which", "node"]).stdout.toString().trim();
+    if (out) return out;
+  } catch {}
+  return "/usr/bin/node";
 })();
-const CHILD_PATH = `${BUN_BIN_DIR}:/usr/local/bin:/usr/bin:/bin`;
+const CHILD_PATH = "/usr/local/bin:/usr/bin:/bin";
 
 async function readAll(stream) {
   if (!stream) return "";
@@ -113,9 +133,10 @@ async function burn(pid, runDir, runId) {
   } catch {}
 }
 
-async function runScript(code) {
+async function runScript(code, hint) {
   const id = randomBytes(8).toString("hex");
-  const scriptFile = join(RUNS_DIR, `${id}.js`);
+  const ext = detectExt(code, hint);
+  const scriptFile = join(RUNS_DIR, `${id}.${ext}`);
   const runDir = `/tmp/run-${id}`;
 
   await mkdir(runDir, { recursive: true, mode: 0o700 });
@@ -128,9 +149,8 @@ async function runScript(code) {
   //  - setpriv --no-new-privs (block setuid escalation) when available
   //  - exec via bash -c, child becomes session/pgrp leader (detached:true)
   const ulimits = `umask 077; ulimit -t ${cpuSec} -v 1048576 -f 51200 -u 200 -n 1024 -c 0`;
-  const inner = SETPRIV_OK
-    ? `setpriv --no-new-privs -- bun ${JSON.stringify(scriptFile)}`
-    : `bun ${JSON.stringify(scriptFile)}`;
+  const runner = `${NODE_BIN} ${JSON.stringify(scriptFile)}`;
+  const inner = SETPRIV_OK ? `setpriv --no-new-privs -- ${runner}` : runner;
   const wrapped = `${ulimits}; exec ${inner}`;
 
   const proc = Bun.spawn(["bash", "-c", wrapped], {
@@ -180,6 +200,7 @@ async function runScript(code) {
     stderr: stderrText,
     exitCode,
     burned: true,
+    moduleKind: ext === "mjs" ? "esm" : "cjs",
   };
 }
 
@@ -257,9 +278,10 @@ async function handleRun(req) {
   active++;
   return streamingJson(async () => {
     try {
-      const result = await runScript(code);
+      const result = await runScript(code, body?.type);
       const payload = {
         ok: !result.timeout && result.exitCode === 0,
+        moduleKind: result.moduleKind,
         output: result.stdout.trim(),
         exitCode: result.exitCode,
         burned: result.burned,
@@ -286,8 +308,8 @@ function infoPayload() {
     version: SERVICE_VERSION,
     timestamp: new Date(now).toISOString(),
     runtime: {
-      bun: Bun.version,
-      node: process.versions?.node || null,
+      server: `bun ${Bun.version}`,
+      userCode: `node (${NODE_BIN})`,
       v8: process.versions?.v8 || null,
       platform: process.platform,
       arch: process.arch,
@@ -320,9 +342,13 @@ function infoPayload() {
       method: "POST",
       path: "/run",
       contentType: "application/json",
-      body: { code: "your Playwright script — `require` and `import` both work" },
+      body: {
+        code: "your Playwright script — `require` and `import` both work",
+        type: "optional 'cjs' or 'esm' to override auto-detection",
+      },
       response: {
         ok: "boolean — true when exitCode === 0 and no timeout",
+        moduleKind: "'cjs' or 'esm' — how the script was run",
         output: "string — stdout from your script (trimmed)",
         stderr: "string — stderr (only when present)",
         exitCode: "number — process exit code",
