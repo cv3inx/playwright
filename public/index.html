@@ -155,6 +155,9 @@
       <div class="endpoint"><span class="method">GET</span><span class="ep-path">/api/info</span><span class="ep-desc">JSON service info</span></div>
       <div class="endpoint"><span class="method">GET</span><span class="ep-path">/health</span><span class="ep-desc">liveness probe</span></div>
       <div class="endpoint"><span class="method post">POST</span><span class="ep-path">/run</span><span class="ep-desc">execute Playwright code</span></div>
+      <div class="endpoint"><span class="method post">POST</span><span class="ep-path">/solve</span><span class="ep-desc">Turnstile token from sitekey + siteurl</span></div>
+      <div class="endpoint"><span class="method post">POST</span><span class="ep-path">/solve-challenge</span><span class="ep-desc">clear "Just a moment" → cookies + html</span></div>
+      <div class="endpoint"><span class="method post">POST</span><span class="ep-path">/bypass</span><span class="ep-desc">easy button: navigate + bypass + return data</span></div>
     </div>
   </div>
 
@@ -166,6 +169,10 @@
       <div class="tab" data-ex="axios">axios (CJS)</div>
       <div class="tab" data-ex="cf">stealth + Cloudflare</div>
       <div class="tab" data-ex="esm">ESM (top-level await)</div>
+      <div class="tab" data-ex="bypass">/bypass (no code)</div>
+      <div class="tab" data-ex="solve">/solve token</div>
+      <div class="tab" data-ex="solveChallenge">/solve-challenge</div>
+      <div class="tab" data-ex="cookieReuse">cookies → fetch</div>
     </div>
     <div class="pre-wrap">
       <button class="copy-btn" onclick="copyExample()">copy</button>
@@ -297,6 +304,108 @@ const page = await browser.newPage();
 await page.goto('https://example.com');
 console.log(await page.title());
 await browser.close();`,
+
+  bypass: `# Easy button: bypass Cloudflare and get the page in ONE call.
+# No Playwright code, no browser handling — just a URL.
+
+# Get the cleared HTML
+curl -X POST $URL/bypass \\\\
+  -H "Content-Type: application/json" \\\\
+  -d '{"url":"https://protected-site.com","return":"html"}'
+
+# Get only the title
+curl -X POST $URL/bypass \\\\
+  -H "Content-Type: application/json" \\\\
+  -d '{"url":"https://protected-site.com","return":"title"}'
+# → {"title":"Real Page Title","url":"https://..."}
+
+# Get plain text (HTML stripped)
+curl -X POST $URL/bypass \\\\
+  -H "Content-Type: application/json" \\\\
+  -d '{"url":"https://protected-site.com","return":"text"}'
+
+# Get cookies + a Cookie header ready to use in subsequent requests
+curl -X POST $URL/bypass \\\\
+  -H "Content-Type: application/json" \\\\
+  -d '{"url":"https://protected-site.com","return":"cookies"}'
+# → {"cookies":[...],"cookieHeader":"cf_clearance=...","userAgent":"..."}
+
+# Default — return everything
+curl -X POST $URL/bypass \\\\
+  -H "Content-Type: application/json" \\\\
+  -d '{"url":"https://protected-site.com"}'
+# → {"ok":true,"url","title","userAgent","cookies","cookieHeader","html","htmlLength","elapsed"}`,
+
+  solve: `# Get a Cloudflare Turnstile token for a (sitekey, siteurl) pair.
+# Use this when you only need the token — e.g. to submit a form
+# protected by Turnstile from your own backend.
+
+curl -X POST $URL/solve \\\\
+  -H "Content-Type: application/json" \\\\
+  -d '{
+    "sitekey": "0x4AAAAAAA...",
+    "siteurl": "https://target.com/login",
+    "timeout": 60
+  }'
+
+# Response:
+# {
+#   "token": "0.GwT...",   ← submit this as cf-turnstile-response
+#   "elapsed": 4.21
+# }
+
+# With optional Turnstile params (action / cdata):
+curl -X POST $URL/solve \\\\
+  -H "Content-Type: application/json" \\\\
+  -d '{
+    "sitekey": "0x4AAAA...",
+    "siteurl": "https://target.com",
+    "action": "login",
+    "cdata": "session-abc123"
+  }'`,
+
+  solveChallenge: `# Clear the "Just a moment..." interstitial and return cookies + final HTML.
+# This is the right endpoint when the whole page is gated, not just a widget.
+
+curl -X POST $URL/solve-challenge \\\\
+  -H "Content-Type: application/json" \\\\
+  -d '{"siteurl":"https://protected-site.com","timeout":60}'
+
+# Response:
+# {
+#   "url":        "https://protected-site.com/",
+#   "title":      "Real page title",
+#   "user_agent": "Mozilla/5.0 ...",
+#   "cookies":    [{name,value,domain,path,expires}, ...],
+#   "html":       "<!doctype html>...",
+#   "elapsed":    5.7
+# }`,
+
+  cookieReuse: `// Pattern: bypass once → reuse cookies for fast subsequent requests.
+// No browser launches after the first call.
+
+const base = '$URL';
+const target = 'https://api.target.com';
+
+// 1) One-time browser bypass to get clearance cookies
+const r = await fetch(\`\${base}/bypass\`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ url: target, return: 'cookies' }),
+});
+const { cookieHeader, userAgent } = await r.json();
+
+// 2) From now on, hit the protected API with plain HTTP — no browser
+const data = await fetch(\`\${target}/items\`, {
+  headers: {
+    'Cookie': cookieHeader,
+    'User-Agent': userAgent,
+  },
+}).then(r => r.json());
+
+console.log(data);
+// 1000x faster than spinning up Playwright per request.
+// Cookies usually live 30+ minutes — cache them client-side.`,
 };
 
 const $ = (id) => document.getElementById(id);
