@@ -148,7 +148,12 @@ async function runScript(code, hint) {
   //  - umask 077, ulimits to prevent miners / fork bombs / runaway disk
   //  - setpriv --no-new-privs (block setuid escalation) when available
   //  - exec via bash -c, child becomes session/pgrp leader (detached:true)
-  const ulimits = `umask 077; ulimit -t ${cpuSec} -v 1048576 -f 51200 -u 200 -n 1024 -c 0`;
+  //
+  //  Note on -v: chromium's address space allocation is enormous (2-3 TB
+  //  reserved virtually even for headless), so vmem ulimit must be unlimited
+  //  or chromium SIGABRTs at startup. RSS is what actually matters; we cap
+  //  that via -m if needed. -d (data segment) also kept generous.
+  const ulimits = `umask 077; ulimit -t ${cpuSec} -f 102400 -u 500 -n 4096 -c 0`;
   const runner = `${NODE_BIN} ${JSON.stringify(scriptFile)}`;
   const inner = SETPRIV_OK ? `setpriv --no-new-privs -- ${runner}` : runner;
   const wrapped = `${ulimits}; exec ${inner}`;
