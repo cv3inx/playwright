@@ -2,7 +2,7 @@ FROM mcr.microsoft.com/playwright:v1.49.0-jammy
 
 USER root
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends util-linux procps psmisc ca-certificates curl \
+    && apt-get install -y --no-install-recommends util-linux procps psmisc ca-certificates curl unzip \
     && rm -rf /var/lib/apt/lists/*
 
 # The base image already has a user at UID 1000 (pwuser). Reuse it — HF Spaces
