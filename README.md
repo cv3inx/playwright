@@ -18,17 +18,6 @@ Public Playwright execution API. POST `/run` with JSON body:
 
 Code may use either CommonJS (`require`) or ESM (`import`).
 
-Response:
-
-```json
-{ "output": "stdout text", "exitCode": 0, "burned": true }
-```
-
-Helpers available in user code:
-- `require('playwright')` — the real library
-- `require('stealth')` — pre-configured stealth wrapper with Turnstile
-  click + optional CAPTCHA solver. See `helpers/stealth/index.js`.
-
 ## Endpoints
 
 | Method | Path        | Description                          |
@@ -38,13 +27,34 @@ Helpers available in user code:
 | GET    | `/health`   | liveness probe                       |
 | POST   | `/run`      | execute Playwright code              |
 
+## Helpers in user code
+
+```js
+const playwright = require('playwright');
+const stealth    = require('stealth');   // anti-bot launch wrapper
+const captcha    = require('captcha');   // local CAPTCHA solvers + solver client
+```
+
+The bundled CAPTCHA suite — no third-party APIs, no per-solve fees:
+
+- **Turnstile / "Just a moment"** — `captcha.solveTurnstile(page)` and
+  `captcha.clearChallenge(siteurl)` use the bundled solver service
+  (Camoufox, runs in the same container).
+- **reCAPTCHA v2** — `captcha.solveRecaptchaV2(page)` does the audio
+  fallback flow with local Whisper.
+- **Text/image CAPTCHA** — `captcha.ocrBuffer(buf)` via local Tesseract.
+- **Math CAPTCHA** — `captcha.solveMath('2 + 3 * 4')`.
+- **Cookie jar** — `captcha.saveCookies / loadCookies` to skip re-solving
+  challenges on subsequent requests.
+
 ## Deploy
 
 ### Hugging Face Space
 
-Already configured. Push to the Space repo (`git@hf.co:spaces/<user>/<name>`)
-and HF builds & runs the Dockerfile. The metadata at the top of this README
-(`sdk: docker`, `app_port: 7860`) tells HF how to expose it.
+Push to `git@hf.co:spaces/<user>/<name>`. The Dockerfile bundles both the
+Playwright API and the Turnstile solver in a single image (HF only allocates
+one container per Space). A supervisor script starts the solver in the
+background and the API in the foreground.
 
 ### VPS / your own server
 
@@ -52,33 +62,17 @@ and HF builds & runs the Dockerfile. The metadata at the top of this README
 git clone https://github.com/cv3inx/playwright.git
 cd playwright
 cp .env.example .env
-# edit .env if you want to change ports / resource caps / add solver keys
 docker compose up -d --build
 ```
 
-The compose file:
-- builds the Dockerfile and runs the container
-- exposes port `7860` on the host (override with `HOST_PORT` in `.env`)
-- gives chromium 2 GB of shared memory (`shm_size: 2gb`)
-- caps CPU and memory (defaults: 4 cores / 8 GB — tune in `.env`)
-- runs `/health` as a Docker healthcheck
-- mounts `/tmp` and `/app/runs` as tmpfs for fast per-request workspace I/O
-- rotates logs (5 × 20 MB)
+Compose runs two containers on an internal Docker network:
+- `playwright-api` (port 7860 → host) — the API
+- `turnstile-solver` (port 9988, internal only) — the solver
 
-Test once it's up:
-```sh
-curl http://your-vps:7860/health
-curl http://your-vps:7860/api/info | jq
-```
+Wired automatically — `playwright-api` calls `http://turnstile-solver:9988`
+inside the network. No external URLs, no API keys.
 
-For HTTPS, put nginx/caddy/traefik in front. With caddy, one line in the
-Caddyfile:
-
-```
-playwright.example.com {
-  reverse_proxy localhost:7860
-}
-```
+For HTTPS, put nginx/caddy/traefik in front of port 7860.
 
 ## Hardening
 
@@ -91,15 +85,3 @@ script wrote from persisting between requests.
 
 Concurrent requests are isolated from each other: each gets its own pgid,
 session, and workspace, so one request's burn cannot disrupt another in flight.
-
-## Optional: CAPTCHA solver
-
-If a target site shows the Cloudflare Turnstile checkbox but the auto-click
-isn't enough (CF spawns an image challenge), `stealth.gotoBypass()` can fall
-back to a paid solver service. Set one of:
-
-- `TWOCAPTCHA_KEY` — https://2captcha.com
-- `CAPSOLVER_KEY` — https://capsolver.com
-
-On HF: Space settings → Variables and secrets.
-On a VPS: edit `.env`.

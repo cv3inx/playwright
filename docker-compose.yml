@@ -1,42 +1,62 @@
 services:
+  # ---------- Self-hosted Turnstile/CF solver (no third-party API) ----------
+  turnstile-solver:
+    build: ./solver
+    container_name: turnstile-solver
+    restart: unless-stopped
+    environment:
+      PORT: 9988
+      MAX_WORKERS: ${SOLVER_WORKERS:-8}
+      CAMOUFOX_HEADLESS: virtual
+    # Solver does not need to be exposed to the host — playwright-api reaches
+    # it over the internal Docker network. Uncomment the ports stanza below
+    # if you want to test it directly.
+    # ports:
+    #   - "9988:9988"
+    shm_size: "1gb"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9988/health > /dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    networks:
+      - internal
+
+  # ---------- Playwright execution API ----------
   playwright-api:
     build: .
     container_name: playwright-api
     restart: unless-stopped
+    depends_on:
+      turnstile-solver:
+        condition: service_healthy
 
-    # Map host port → container port (HF Space uses 7860; on a VPS pick whatever).
-    # If you put nginx/caddy in front, drop the host side and rely on the network.
     ports:
       - "${HOST_PORT:-7860}:7860"
 
     environment:
       PORT: 7860
-      TIMEOUT_MS: ${TIMEOUT_MS:-1800000}      # 30 minutes per request
-      # Self-hosted CAPTCHA solver — point at an instance of
-      # github.com/cv3inx/turnstile-solver. No third-party API.
-      TURNSTILE_SOLVER_URL: ${TURNSTILE_SOLVER_URL:-}
+      TIMEOUT_MS: ${TIMEOUT_MS:-1800000}
+      # Wired to the bundled solver — no external URL, no API key.
+      TURNSTILE_SOLVER_URL: http://turnstile-solver:9988
       WHISPER_MODEL: ${WHISPER_MODEL:-Xenova/whisper-tiny.en}
       COOKIES_DIR: /app/cookies
 
-    # Chromium needs more shared memory than the Docker default (64 MB) or
-    # tabs crash with "Target closed". 2 GB is comfortable for many parallel
-    # browsers; raise it if you run dozens of contexts at once.
     shm_size: "2gb"
-
-    # ipc:host gives chromium full access to the host's IPC — simplest fix
-    # for /dev/shm pressure on heavy workloads. Comment out if you prefer
-    # full isolation; in that case bump shm_size further.
     ipc: host
 
-    # Cap container resources so a runaway script can't eat the host.
-    # Tune to your VPS — these are sensible defaults for a 4-core / 8 GB box.
     deploy:
       resources:
         limits:
           cpus: "${CPU_LIMIT:-4.0}"
           memory: "${MEM_LIMIT:-8g}"
 
-    # Healthcheck so Docker knows when the container is actually serving.
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:7860/health > /dev/null || exit 1"]
       interval: 30s
@@ -44,23 +64,25 @@ services:
       retries: 3
       start_period: 30s
 
-    # Persist the per-request workspace dir on a tmpfs — it's wiped per request
-    # anyway and tmpfs avoids touching disk.
     tmpfs:
       - /tmp:size=2g,exec
       - /app/runs:size=512m,exec
 
-    # Persist the cookie jar across restarts so we don't have to re-solve CF
-    # for every container boot.
     volumes:
       - playwright-cookies:/app/cookies
 
-    # Logging — keep recent logs but don't fill the disk.
     logging:
       driver: json-file
       options:
         max-size: "20m"
         max-file: "5"
+
+    networks:
+      - internal
+
+networks:
+  internal:
+    driver: bridge
 
 volumes:
   playwright-cookies:
