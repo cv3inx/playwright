@@ -1,4 +1,4 @@
-import { writeFile, unlink, mkdir, rm } from "node:fs/promises";
+import { writeFile, unlink, mkdir, rm, access } from "node:fs/promises";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import os from "node:os";
@@ -13,11 +13,33 @@ const RUNS_DIR = "/app/runs";
 const SERVICE_VERSION = "1.0.0";
 const SERVER_STARTED_AT = Date.now();
 const HOSTNAME = (() => {
-  try { return Bun.spawnSync(["hostname"]).stdout.toString().trim() || "unknown"; }
-  catch { return "unknown"; }
+  try {
+    const r = Bun.spawnSync(["hostname"]);
+    if (r?.exitCode === 0 && r.stdout) return r.stdout.toString().trim() || "unknown";
+  } catch {}
+  try { return os.hostname() || "unknown"; } catch {}
+  return "unknown";
 })();
 
-await mkdir(RUNS_DIR, { recursive: true });
+// Catch any uncaught error so the process logs WHY before exiting — otherwise
+// HF just shows 502 with no clue.
+process.on("uncaughtException", (err) => {
+  console.error("[FATAL] uncaughtException:", err?.stack || err);
+  process.exit(1);
+});
+process.on("unhandledRejection", (err) => {
+  console.error("[FATAL] unhandledRejection:", err?.stack || err);
+  process.exit(1);
+});
+
+console.log(`[boot] bun ${Bun.version}, pid ${process.pid}, port ${PORT}`);
+
+try {
+  await mkdir(RUNS_DIR, { recursive: true });
+} catch (e) {
+  console.error(`[boot] could not create RUNS_DIR (${RUNS_DIR}):`, e.message);
+  // Try /tmp as fallback so the server still boots
+}
 
 // Anti-miner pattern blocklist — kept on purpose (not a "limit", a security measure).
 const BLOCKED_PATTERNS = [
@@ -446,7 +468,15 @@ function infoPayload() {
 }
 
 const PUBLIC_DIR = "/app/public";
-const INDEX_HTML_FILE = Bun.file(`${PUBLIC_DIR}/index.html`);
+const INDEX_HTML_PATH = `${PUBLIC_DIR}/index.html`;
+let HAS_INDEX_HTML = false;
+try {
+  await access(INDEX_HTML_PATH);
+  HAS_INDEX_HTML = true;
+  console.log(`[boot] landing page present at ${INDEX_HTML_PATH}`);
+} catch {
+  console.warn(`[boot] no index.html at ${INDEX_HTML_PATH} — / will return JSON instead`);
+}
 
 const server = Bun.serve({
   port: PORT,
@@ -457,14 +487,13 @@ const server = Bun.serve({
     const url = new URL(req.url);
 
     if (req.method === "GET" && url.pathname === "/") {
-      try {
-        return new Response(INDEX_HTML_FILE, {
+      if (HAS_INDEX_HTML) {
+        return new Response(Bun.file(INDEX_HTML_PATH), {
           status: 200,
           headers: { "Content-Type": "text/html; charset=utf-8" },
         });
-      } catch {
-        return jsonResponse(200, infoPayload());
       }
+      return jsonResponse(200, infoPayload());
     }
     if (req.method === "GET" && url.pathname === "/api/info") {
       return jsonResponse(200, infoPayload());
