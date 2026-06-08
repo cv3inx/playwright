@@ -8,7 +8,7 @@ const TIMEOUT = parseInt(Bun.env.TIMEOUT_MS || "1800000", 10); // 30 minutes
 const HEARTBEAT_MS = 30000;
 const KILL_GRACE_MS = 500;
 
-const NODE_MODULES = "/app/node_modules";
+const NODE_MODULES = "/app/node_modules:/app/helpers";
 const RUNS_DIR = "/app/runs";
 const SERVICE_VERSION = "1.0.0";
 const SERVER_STARTED_AT = Date.now();
@@ -408,7 +408,34 @@ function infoPayload() {
       packageVersion: "1.49.0",
       browsersPath: process.env.PLAYWRIGHT_BROWSERS_PATH || "/ms-playwright",
       baseImage: "mcr.microsoft.com/playwright:v1.49.0-jammy",
-      launchExample: "const { chromium } = require('playwright'); const browser = await chromium.launch({ headless: true });",
+      browsers: {
+        chromium: "bundled (headless_shell + headed)",
+        firefox: "bundled",
+        webkit: "bundled",
+        chrome: "Google Chrome stable installed (use channel: 'chrome' for Widevine DRM)",
+      },
+      fonts: ["liberation", "noto", "noto-color-emoji", "noto-cjk", "ipafont-gothic", "wqy-zenhei", "thai-tlwg", "kacst"],
+      xvfb: "available — headless:false works via Xvfb if needed",
+    },
+    stealth: {
+      preinstalled: ["playwright-extra", "puppeteer-extra-plugin-stealth"],
+      helperModule: "require('stealth') — pre-configured anti-detection wrapper",
+      api: {
+        "stealth.launch(opts)": "launch chromium with stealth plugin + anti-detect args",
+        "stealth.launch({ channel: 'chrome' })": "launch real Google Chrome (Widevine DRM)",
+        "stealth.context(browser, opts)": "context with realistic UA, viewport, locale, plugin shims",
+        "stealth.gotoBypass(page, url)": "navigate + auto-wait for Cloudflare 'Just a moment' challenge",
+        "stealth.waitForCloudflare(page)": "standalone wait for CF interstitial to clear",
+      },
+      bypasses: {
+        "navigator.webdriver": "removed",
+        "navigator.plugins/languages": "spoofed to look like real browser",
+        "window.chrome": "stub injected",
+        "AutomationControlled flag": "disabled",
+        "Cloudflare 'Please wait a moment'": "auto-wait + retry until cleared",
+      },
+      caveats: "Cloudflare Turnstile (interactive) and CF Bot Management (ML-based) usually still block. Use a CAPTCHA solver service (capsolver/2captcha) for those — not included by default.",
+      example: "const stealth = require('stealth');\nconst browser = await stealth.launch();\nconst ctx = await stealth.context(browser);\nconst page = await ctx.newPage();\nawait stealth.gotoBypass(page, 'https://protected-site.com');\nconsole.log(await page.title());\nawait browser.close();",
     },
   };
 }
