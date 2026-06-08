@@ -12,6 +12,12 @@ const KILL_GRACE_MS = 500;
 
 const NODE_MODULES = "/app/node_modules";
 const RUNS_DIR = "/app/runs";
+const SERVICE_VERSION = "1.0.0";
+const SERVER_STARTED_AT = Date.now();
+const HOSTNAME = (() => {
+  try { return Bun.spawnSync(["hostname"]).stdout.toString().trim() || "unknown"; }
+  catch { return "unknown"; }
+})();
 
 await mkdir(RUNS_DIR, { recursive: true });
 
@@ -284,26 +290,122 @@ const server = Bun.serve({
     const url = new URL(req.url);
 
     if (req.method === "GET" && url.pathname === "/") {
+      const startedAt = SERVER_STARTED_AT;
+      const now = Date.now();
+      const memMB = (n) => Math.round((n / 1024 / 1024) * 100) / 100;
+      const mem = process.memoryUsage();
+      let osLoad = null;
+      let osTotalMem = null;
+      let osFreeMem = null;
+      let osCpus = null;
+      try {
+        const os = await import("node:os");
+        osLoad = os.loadavg();
+        osTotalMem = os.totalmem();
+        osFreeMem = os.freemem();
+        osCpus = os.cpus()?.length;
+      } catch {}
+
       return jsonResponse(200, {
         status: "ok",
-        runtime: `bun ${Bun.version}`,
-        endpoint: "POST /run { code }",
-        notes: "Code may use either CommonJS (require) or ESM (import).",
+        service: "playwright-api",
+        version: SERVICE_VERSION,
+        runtime: {
+          bun: Bun.version,
+          node: process.versions?.node || null,
+          v8: process.versions?.v8 || null,
+          platform: process.platform,
+          arch: process.arch,
+          pid: process.pid,
+        },
+        host: {
+          hostname: HOSTNAME,
+          cpus: osCpus,
+          loadAvg: osLoad,
+          totalMemMB: osTotalMem ? memMB(osTotalMem) : null,
+          freeMemMB: osFreeMem ? memMB(osFreeMem) : null,
+        },
+        process: {
+          startedAt: new Date(startedAt).toISOString(),
+          uptimeSec: Math.round((now - startedAt) / 1000),
+          rssMB: memMB(mem.rss),
+          heapUsedMB: memMB(mem.heapUsed),
+          heapTotalMB: memMB(mem.heapTotal),
+          externalMB: memMB(mem.external),
+        },
+        endpoints: [
+          { method: "GET",  path: "/",       desc: "this info page" },
+          { method: "GET",  path: "/health", desc: "liveness probe (200 ok)" },
+          { method: "POST", path: "/run",    desc: "execute Playwright code", body: { code: "string (CJS or ESM)" } },
+        ],
+        request: {
+          method: "POST",
+          url: "/run",
+          contentType: "application/json",
+          body: { code: "string — your Playwright script (require or import both work)" },
+          response: {
+            output: "stdout text",
+            stderr: "stderr text (if any)",
+            exitCode: "process exit code",
+            truncated: "true if stdout/stderr was capped at 5MB",
+            burned: "true if cleanup ran",
+          },
+          example: {
+            curl: 'curl -X POST $URL/run -H "Content-Type: application/json" -d \'{"code":"const {chromium}=require(\\"playwright\\");(async()=>{const b=await chromium.launch();const p=await b.newPage();await p.goto(\\"https://example.com\\");console.log(await p.title());await b.close();})();"}\'',
+          },
+          longRunning: `Server emits a single space character every ${HEARTBEAT_MS}ms during execution to keep proxies/clients from timing out. JSON.parse skips leading whitespace, so clients see the same parseable JSON object at the end.`,
+        },
         hardening: {
+          summary: "Each /run request is process-isolated, resource-capped, and burned (process tree killed + workspace wiped) on completion.",
           setpriv: SETPRIV_OK,
+          noNewPrivs: SETPRIV_OK,
           envStripped: true,
-          perRequestWorkspace: "/tmp/run-<id>",
+          envExposedToChild: ["PATH", "HOME", "TMPDIR", "CWD", "NODE_PATH", "PLAYWRIGHT_BROWSERS_PATH", "LANG"],
+          perRequestWorkspace: "/tmp/run-<16-hex-id>",
+          homeRedirectedTo: "per-request workspace",
+          tmpdirRedirectedTo: "per-request workspace",
+          umask: "077",
+          ulimits: {
+            cpuSec: "TIMEOUT_MS/1000 + 5",
+            virtualMemKB: 1048576,
+            fileSizeKB: 51200,
+            maxUserProcs: 200,
+            maxOpenFiles: 1024,
+            coreDumps: 0,
+          },
           burnOnComplete: true,
-          burnSteps: ["killpg(-pid)", "pkill -s sid", "pkill -f runDir", "rm -rf runDir", "wipe /dev/shm chromium leftovers"],
-          ulimits: "cpu/mem/files/procs/fd",
+          burnSteps: [
+            "kill(-pid, SIGKILL)  — kill entire process group",
+            "pkill -9 -s <pid>    — kill entire session (catches escapes)",
+            "pkill -9 -f <runDir> — kill anything referencing this run's workspace",
+            "rm -rf /tmp/run-<id> — wipe any binary/file the script wrote",
+            "wipe orphaned /dev/shm chromium SHM (only if no other process holds it)",
+          ],
+          isolationBetweenRequests: "Each request gets its own pgid, sid, runDir, and PID. One request's burn never touches another in flight.",
+          notSandbox: "Hardening, not a sandbox. User code can still make outbound HTTP requests via Playwright. Mining / privilege escalation / persistent binaries / env leaks are mitigated, but a determined attacker may still abuse the egress path.",
         },
         limits: {
           maxCodeBytes: MAX_CODE_BYTES,
+          maxBodyBytes: MAX_BODY_BYTES,
+          maxOutputBytesPerStream: MAX_OUTPUT_BYTES,
           timeoutMs: TIMEOUT,
+          timeoutHuman: `${Math.round(TIMEOUT / 60000)} minutes`,
           heartbeatMs: HEARTBEAT_MS,
           activeNow: active,
+          concurrencyLimit: "none (run as many parallel /run requests as the box can handle)",
         },
+        blockedPatterns: BLOCKED_PATTERNS.map((re) => re.source),
+        playwright: {
+          browsersPath: process.env.PLAYWRIGHT_BROWSERS_PATH || "/ms-playwright",
+          baseImage: "mcr.microsoft.com/playwright:v1.49.0-jammy",
+          packageVersion: "1.49.0",
+          launchExample: "const { chromium } = require('playwright'); const browser = await chromium.launch({ headless: true });",
+        },
+        timestamp: new Date(now).toISOString(),
       });
+    }
+    if (req.method === "GET" && url.pathname === "/health") {
+      return jsonResponse(200, { status: "ok", uptimeSec: Math.round((Date.now() - SERVER_STARTED_AT) / 1000) });
     }
     if (req.method === "POST" && url.pathname === "/run") {
       return handleRun(req);
