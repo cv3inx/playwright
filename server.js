@@ -686,51 +686,141 @@ try {
   console.warn(`[boot] no index.html at ${INDEX_HTML_PATH} — / will return JSON instead`);
 }
 
+// ---------- Request logger ----------
+//
+// Logs every request as a single line:
+//   [2026-06-09T03:14:15.123Z] POST /run                          → 200 (1234ms) ip=1.2.3.4 ua="curl/8.5"
+// /health is skipped (Docker pings it every 30s and would spam the log).
+// 4xx/5xx are highlighted; payload-relevant fields (sitekey/url) are added
+// for the solver endpoints to make debugging easier.
+const LOG_QUIET_PATHS = new Set(["/health", "/api/info", "/favicon.ico"]);
+
+function colorStatus(status) {
+  if (status >= 500) return `\x1b[31m${status}\x1b[0m`; // red
+  if (status >= 400) return `\x1b[33m${status}\x1b[0m`; // yellow
+  if (status >= 300) return `\x1b[36m${status}\x1b[0m`; // cyan
+  return `\x1b[32m${status}\x1b[0m`; // green
+}
+
+function clientIp(req, srv) {
+  // Prefer the network-layer peer; fall back to forwarded headers behind a proxy.
+  const peer = srv?.requestIP?.(req)?.address;
+  if (peer && peer !== "::1" && peer !== "127.0.0.1") return peer;
+  const fwd = req.headers.get("x-forwarded-for");
+  if (fwd) return fwd.split(",")[0].trim();
+  const real = req.headers.get("x-real-ip");
+  if (real) return real;
+  return peer || "-";
+}
+
+async function readPayloadHints(req) {
+  // Cheap request-body inspection for log context. Clones the request body
+  // (Bun supports this) so the actual handler can still consume it.
+  if (req.method !== "POST") return "";
+  const ct = (req.headers.get("content-type") || "").toLowerCase();
+  if (!ct.includes("application/json")) return "";
+  try {
+    const txt = await req.clone().text();
+    if (!txt) return "";
+    const data = JSON.parse(txt);
+    const hints = [];
+    if (data.url) hints.push(`url=${truncate(String(data.url), 60)}`);
+    else if (data.siteurl) hints.push(`siteurl=${truncate(String(data.siteurl), 60)}`);
+    if (data.sitekey) hints.push(`sitekey=${truncate(String(data.sitekey), 16)}`);
+    if (data.return) hints.push(`return=${data.return}`);
+    if (data.code) hints.push(`code=${data.code.length}b`);
+    if (data.type) hints.push(`type=${data.type}`);
+    return hints.length ? " " + hints.join(" ") : "";
+  } catch {
+    return "";
+  }
+}
+
+function truncate(s, n) {
+  if (typeof s !== "string") return "";
+  return s.length > n ? s.slice(0, n - 1) + "…" : s;
+}
+
+async function route(req) {
+  const url = new URL(req.url);
+
+  if (req.method === "GET" && url.pathname === "/") {
+    if (HAS_INDEX_HTML) {
+      return new Response(Bun.file(INDEX_HTML_PATH), {
+        status: 200,
+        headers: { "Content-Type": "text/html; charset=utf-8" },
+      });
+    }
+    return jsonResponse(200, infoPayload());
+  }
+  if (req.method === "GET" && url.pathname === "/api/info") {
+    return jsonResponse(200, infoPayload());
+  }
+  if (req.method === "GET" && url.pathname === "/health") {
+    return jsonResponse(200, {
+      status: "ok",
+      uptimeSec: Math.round((Date.now() - SERVER_STARTED_AT) / 1000),
+      activeRequests: active,
+    });
+  }
+  if (req.method === "POST" && url.pathname === "/run") {
+    return handleRun(req);
+  }
+  if (req.method === "POST" && url.pathname === "/solve") {
+    return handleSolve(req);
+  }
+  if (req.method === "POST" && url.pathname === "/solve-challenge") {
+    return handleSolveChallenge(req);
+  }
+  if (req.method === "POST" && url.pathname === "/bypass") {
+    return handleBypass(req);
+  }
+  return jsonResponse(404, {
+    error: "not_found",
+    method: req.method,
+    path: url.pathname,
+    hint: "see GET / for available endpoints",
+  });
+}
+
 const server = Bun.serve({
   port: PORT,
   hostname: "0.0.0.0",
   idleTimeout: 255,
   maxRequestBodySize: 1024 * 1024 * 1024, // 1 GiB — effectively no body limit
-  async fetch(req) {
+  async fetch(req, srv) {
+    const t0 = performance.now();
     const url = new URL(req.url);
+    const path = url.pathname;
+    const quiet = LOG_QUIET_PATHS.has(path);
 
-    if (req.method === "GET" && url.pathname === "/") {
-      if (HAS_INDEX_HTML) {
-        return new Response(Bun.file(INDEX_HTML_PATH), {
-          status: 200,
-          headers: { "Content-Type": "text/html; charset=utf-8" },
-        });
+    const hints = quiet ? "" : await readPayloadHints(req);
+    const ip = clientIp(req, srv);
+    const ua = req.headers.get("user-agent") || "";
+
+    let resp;
+    let errored = null;
+    try {
+      resp = await route(req);
+    } catch (e) {
+      errored = e;
+      resp = jsonResponse(500, { error: "internal", message: String(e?.message || e) });
+    }
+
+    const ms = Math.round(performance.now() - t0);
+    if (!quiet || resp.status >= 400) {
+      const ts = new Date().toISOString();
+      const status = colorStatus(resp.status);
+      const ipPart = ip !== "-" ? ` ip=${ip}` : "";
+      const uaPart = ua ? ` ua="${truncate(ua, 60)}"` : "";
+      console.log(
+        `[${ts}] ${req.method.padEnd(4)} ${path.padEnd(20)} → ${status} (${ms}ms)${hints}${ipPart}${uaPart}`
+      );
+      if (errored) {
+        console.error(`  └─ error:`, errored?.stack || errored);
       }
-      return jsonResponse(200, infoPayload());
     }
-    if (req.method === "GET" && url.pathname === "/api/info") {
-      return jsonResponse(200, infoPayload());
-    }
-    if (req.method === "GET" && url.pathname === "/health") {
-      return jsonResponse(200, {
-        status: "ok",
-        uptimeSec: Math.round((Date.now() - SERVER_STARTED_AT) / 1000),
-        activeRequests: active,
-      });
-    }
-    if (req.method === "POST" && url.pathname === "/run") {
-      return handleRun(req);
-    }
-    if (req.method === "POST" && url.pathname === "/solve") {
-      return handleSolve(req);
-    }
-    if (req.method === "POST" && url.pathname === "/solve-challenge") {
-      return handleSolveChallenge(req);
-    }
-    if (req.method === "POST" && url.pathname === "/bypass") {
-      return handleBypass(req);
-    }
-    return jsonResponse(404, {
-      error: "not_found",
-      method: req.method,
-      path: url.pathname,
-      hint: "see GET / for available endpoints",
-    });
+    return resp;
   },
 });
 
