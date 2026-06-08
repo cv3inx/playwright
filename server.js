@@ -10,6 +10,7 @@ const KILL_GRACE_MS = 500;
 
 const NODE_MODULES = "/app/node_modules:/app/helpers";
 const RUNS_DIR = "/app/runs";
+const SOLVER_URL = (Bun.env.TURNSTILE_SOLVER_URL || "").replace(/\/+$/, "");
 const SERVICE_VERSION = "1.0.0";
 const SERVER_STARTED_AT = Date.now();
 const HOSTNAME = (() => {
@@ -322,6 +323,164 @@ async function handleRun(req) {
   });
 }
 
+// ---------- Solver proxy endpoints ----------
+//
+// These proxy the bundled (or compose-network) turnstile-solver service.
+// Caller doesn't need to know that solver exists or where it lives — the
+// API surface is local to this server.
+
+async function solverFetch(path, body, opts = {}) {
+  if (!SOLVER_URL) {
+    return { status: 503, body: { error: "solver_unavailable", message: "TURNSTILE_SOLVER_URL is not configured" } };
+  }
+  const ctrl = new AbortController();
+  const timeout = opts.timeout ?? 90000;
+  const t = setTimeout(() => ctrl.abort(), timeout);
+  try {
+    const resp = await fetch(`${SOLVER_URL}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: ctrl.signal,
+    });
+    const txt = await resp.text();
+    let parsed;
+    try { parsed = JSON.parse(txt); } catch { parsed = { raw: txt }; }
+    return { status: resp.status, body: parsed };
+  } catch (e) {
+    if (e?.name === "AbortError") {
+      return { status: 504, body: { error: "solver_timeout", timeoutMs: timeout } };
+    }
+    return { status: 502, body: { error: "solver_unreachable", message: String(e?.message || e) } };
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+// POST /solve  { sitekey, siteurl, action?, cdata?, timeout? }  → { token, elapsed }
+async function handleSolve(req) {
+  let body;
+  try { body = await req.json(); } catch {
+    return jsonResponse(400, { error: "invalid_json" });
+  }
+  const sitekey = (body?.sitekey || "").trim();
+  const siteurl = (body?.siteurl || "").trim();
+  if (!sitekey || !siteurl) {
+    return jsonResponse(400, {
+      error: "missing_fields",
+      message: '"sitekey" and "siteurl" are required',
+      example: { sitekey: "0x4AAAAAAA...", siteurl: "https://example.com" },
+    });
+  }
+  active++;
+  try {
+    const { status, body: out } = await solverFetch("/solve", {
+      sitekey,
+      siteurl,
+      action: body.action,
+      cdata: body.cdata,
+      timeout: body.timeout,
+    }, { timeout: ((body.timeout || 90) + 15) * 1000 });
+    return jsonResponse(status, out);
+  } finally {
+    active--;
+  }
+}
+
+// POST /solve-challenge  { siteurl, timeout? }  → { url, title, user_agent, cookies, html }
+async function handleSolveChallenge(req) {
+  let body;
+  try { body = await req.json(); } catch {
+    return jsonResponse(400, { error: "invalid_json" });
+  }
+  const siteurl = (body?.siteurl || "").trim();
+  if (!siteurl) {
+    return jsonResponse(400, {
+      error: "missing_fields",
+      message: '"siteurl" is required',
+      example: { siteurl: "https://target-with-cf.com" },
+    });
+  }
+  active++;
+  try {
+    const { status, body: out } = await solverFetch("/solve-challenge", {
+      siteurl,
+      timeout: body.timeout,
+    }, { timeout: ((body.timeout || 90) + 15) * 1000 });
+    return jsonResponse(status, out);
+  } finally {
+    active--;
+  }
+}
+
+// POST /bypass  { url, return?, timeout? }
+//   return: "html" | "text" | "title" | "cookies" | "all" (default)
+//
+// Convenience: clear CF challenge via solver, then return whatever the caller
+// wants. This is the easy button — no Playwright code, just give a URL.
+async function handleBypass(req) {
+  let body;
+  try { body = await req.json(); } catch {
+    return jsonResponse(400, { error: "invalid_json" });
+  }
+  const url = (body?.url || body?.siteurl || "").trim();
+  if (!url) {
+    return jsonResponse(400, {
+      error: "missing_fields",
+      message: '"url" is required',
+      example: { url: "https://target-with-cf.com", return: "all" },
+    });
+  }
+  const want = (body?.return || "all").toLowerCase();
+  active++;
+  try {
+    const { status, body: out } = await solverFetch("/solve-challenge", {
+      siteurl: url,
+      timeout: body.timeout,
+    }, { timeout: ((body.timeout || 90) + 15) * 1000 });
+
+    if (status !== 200) return jsonResponse(status, out);
+
+    // Shape the response per `return` selector
+    if (want === "html") return new Response(out.html || "", {
+      status: 200,
+      headers: { "Content-Type": "text/html; charset=utf-8" },
+    });
+    if (want === "text") {
+      const text = (out.html || "").replace(/<script[\s\S]*?<\/script>/gi, " ")
+                                    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+                                    .replace(/<[^>]+>/g, " ")
+                                    .replace(/\s+/g, " ")
+                                    .trim();
+      return new Response(text, { status: 200, headers: { "Content-Type": "text/plain; charset=utf-8" } });
+    }
+    if (want === "title") return jsonResponse(200, { title: out.title || "", url: out.url });
+    if (want === "cookies") {
+      const cookieHeader = (out.cookies || []).map(c => `${c.name}=${c.value}`).join("; ");
+      return jsonResponse(200, {
+        cookies: out.cookies || [],
+        cookieHeader,
+        userAgent: out.user_agent || "",
+        url: out.url,
+      });
+    }
+    // default "all"
+    return jsonResponse(200, {
+      ok: true,
+      url: out.url,
+      title: out.title,
+      userAgent: out.user_agent,
+      cookies: out.cookies,
+      cookieHeader: (out.cookies || []).map(c => `${c.name}=${c.value}`).join("; "),
+      html: out.html,
+      htmlLength: (out.html || "").length,
+      elapsed: out.elapsed,
+    });
+  } finally {
+    active--;
+  }
+}
+
 function infoPayload() {
   const now = Date.now();
   const memMB = (n) => Math.round((n / 1024 / 1024) * 100) / 100;
@@ -358,11 +517,23 @@ function infoPayload() {
       },
     },
     endpoints: [
-      { method: "GET",  path: "/",         desc: "HTML landing page" },
-      { method: "GET",  path: "/api/info", desc: "this JSON info" },
-      { method: "GET",  path: "/health",   desc: "liveness probe" },
-      { method: "POST", path: "/run",      desc: "execute Playwright code", body: { code: "string (CJS or ESM)" } },
+      { method: "GET",  path: "/",                desc: "HTML landing page" },
+      { method: "GET",  path: "/api/info",        desc: "this JSON info" },
+      { method: "GET",  path: "/health",          desc: "liveness probe" },
+      { method: "POST", path: "/run",             desc: "execute Playwright code", body: { code: "string (CJS or ESM)" } },
+      { method: "POST", path: "/solve",           desc: "Turnstile token from sitekey + siteurl", body: { sitekey: "string", siteurl: "string", action: "string?", cdata: "string?", timeout: "seconds?" } },
+      { method: "POST", path: "/solve-challenge", desc: "clear 'Just a moment' interstitial; returns cookies + html", body: { siteurl: "string", timeout: "seconds?" } },
+      { method: "POST", path: "/bypass",          desc: "easy button: navigate + bypass CF + return html/text/title/cookies/all", body: { url: "string", return: "html|text|title|cookies|all" } },
     ],
+    solverProxy: {
+      enabled: !!SOLVER_URL,
+      url: SOLVER_URL || "(not configured)",
+      examples: {
+        solve: 'curl -X POST $URL/solve -H "Content-Type: application/json" -d \'{"sitekey":"0x4AAAA...","siteurl":"https://target.com"}\'',
+        solveChallenge: 'curl -X POST $URL/solve-challenge -H "Content-Type: application/json" -d \'{"siteurl":"https://protected.com"}\'',
+        bypass: 'curl -X POST $URL/bypass -H "Content-Type: application/json" -d \'{"url":"https://protected.com","return":"text"}\'',
+      },
+    },
     request: {
       method: "POST",
       path: "/run",
@@ -544,6 +715,15 @@ const server = Bun.serve({
     }
     if (req.method === "POST" && url.pathname === "/run") {
       return handleRun(req);
+    }
+    if (req.method === "POST" && url.pathname === "/solve") {
+      return handleSolve(req);
+    }
+    if (req.method === "POST" && url.pathname === "/solve-challenge") {
+      return handleSolveChallenge(req);
+    }
+    if (req.method === "POST" && url.pathname === "/bypass") {
+      return handleBypass(req);
     }
     return jsonResponse(404, {
       error: "not_found",
