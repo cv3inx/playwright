@@ -110,12 +110,166 @@ async function context(browser, opts = {}) {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const jitter = (min, max) => sleep(min + Math.random() * (max - min));
+
+// Try to click the Turnstile / "Verify you are human" checkbox if present.
+// Returns true if a click was attempted, false if no checkbox visible.
+//
+// Cloudflare Turnstile renders inside an <iframe> on a different origin.
+// Playwright cannot read pixel content cross-origin, but it CAN dispatch
+// a click at a known coordinate inside that iframe (Turnstile's checkbox
+// is positioned at a predictable offset). Combined with stealth fingerprint,
+// this passes the 'soft' Turnstile (where checkbox click is enough).
+async function clickTurnstile(page, opts = {}) {
+  const { timeout = 15000 } = opts;
+  const deadline = Date.now() + timeout;
+
+  while (Date.now() < deadline) {
+    try {
+      // 1. Direct iframe approach (most reliable for current CF Turnstile)
+      const tsFrame = page.frames().find((f) => {
+        const u = f.url() || '';
+        return u.includes('challenges.cloudflare.com') || u.includes('turnstile');
+      });
+      if (tsFrame) {
+        // Wait a beat — Turnstile sometimes needs to finish boot animation
+        await jitter(800, 1500);
+        // Try the canonical checkbox first
+        const candidates = [
+          'input[type="checkbox"]',
+          'label.cb-lb',
+          'div.cb-c',
+          '#challenge-stage input',
+        ];
+        for (const sel of candidates) {
+          const loc = tsFrame.locator(sel).first();
+          if (await loc.count().catch(() => 0)) {
+            await loc.click({ timeout: 3000, force: true }).catch(() => {});
+            return true;
+          }
+        }
+        // Fallback: blind click at the typical checkbox offset (28, 28) inside the frame
+        const el = await tsFrame.frameElement().catch(() => null);
+        if (el) {
+          const box = await el.boundingBox().catch(() => null);
+          if (box) {
+            await page.mouse.move(box.x + 30 + Math.random() * 4, box.y + 30 + Math.random() * 4, { steps: 8 });
+            await jitter(150, 400);
+            await page.mouse.click(box.x + 30, box.y + 30);
+            return true;
+          }
+        }
+      }
+
+      // 2. Generic "Verify you are human" button (sometimes outside iframe)
+      const btnSelectors = [
+        'button:has-text("Verify you are human")',
+        'button:has-text("Verify")',
+        'input[type="button"][value*="Verify"]',
+      ];
+      for (const sel of btnSelectors) {
+        const btn = page.locator(sel).first();
+        if (await btn.count().catch(() => 0)) {
+          await btn.click({ timeout: 3000 }).catch(() => {});
+          return true;
+        }
+      }
+    } catch {}
+    await sleep(500);
+  }
+  return false;
+}
+
+// If TWOCAPTCHA_KEY (or CAPSOLVER_KEY) env var is set on the Space, this hook
+// can be plugged into waitForCloudflare to solve image-CAPTCHAs that show up
+// after the checkbox click. Disabled by default — costs money and requires
+// signup. Implementation skeleton follows the 2captcha API.
+async function solveTurnstileWithService(page, opts = {}) {
+  const apiKey = opts.apiKey || process.env.TWOCAPTCHA_KEY || process.env.CAPSOLVER_KEY;
+  if (!apiKey) return false;
+
+  // Extract sitekey + page URL
+  const sitekey = await page.evaluate(() => {
+    const el = document.querySelector('[data-sitekey], .cf-turnstile[data-sitekey]');
+    return el?.getAttribute('data-sitekey') || null;
+  });
+  if (!sitekey) return false;
+
+  const pageUrl = page.url();
+  const service = opts.service || (process.env.CAPSOLVER_KEY ? 'capsolver' : '2captcha');
+
+  try {
+    if (service === '2captcha') {
+      // Submit job
+      const submit = await fetch(`https://2captcha.com/in.php?key=${apiKey}&method=turnstile&sitekey=${sitekey}&pageurl=${encodeURIComponent(pageUrl)}&json=1`);
+      const sub = await submit.json();
+      if (sub.status !== 1) return false;
+      const jobId = sub.request;
+      // Poll
+      for (let i = 0; i < 40; i++) {
+        await sleep(5000);
+        const r = await fetch(`https://2captcha.com/res.php?key=${apiKey}&action=get&id=${jobId}&json=1`);
+        const j = await r.json();
+        if (j.status === 1) {
+          await page.evaluate((token) => {
+            const el = document.querySelector('input[name="cf-turnstile-response"]');
+            if (el) el.value = token;
+            window.turnstile?.execute?.();
+          }, j.request);
+          return true;
+        }
+      }
+    } else if (service === 'capsolver') {
+      const create = await fetch('https://api.capsolver.com/createTask', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          clientKey: apiKey,
+          task: { type: 'AntiTurnstileTaskProxyLess', websiteURL: pageUrl, websiteKey: sitekey },
+        }),
+      });
+      const cr = await create.json();
+      if (!cr.taskId) return false;
+      for (let i = 0; i < 40; i++) {
+        await sleep(3000);
+        const r = await fetch('https://api.capsolver.com/getTaskResult', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ clientKey: apiKey, taskId: cr.taskId }),
+        });
+        const j = await r.json();
+        if (j.status === 'ready') {
+          await page.evaluate((token) => {
+            const el = document.querySelector('input[name="cf-turnstile-response"]');
+            if (el) el.value = token;
+            window.turnstile?.execute?.();
+          }, j.solution.token);
+          return true;
+        }
+      }
+    }
+  } catch {}
+  return false;
+}
 
 // Wait until the Cloudflare interstitial / Just A Moment page goes away.
 // Resolves true once we see real content, false on timeout.
+//
+// Strategy:
+//   1. Detect the interstitial.
+//   2. If a Turnstile checkbox is visible — click it (autoClick=true).
+//   3. If a CAPTCHA solver key is configured — try service-based solve.
+//   4. Poll for content to load.
 async function waitForCloudflare(page, opts = {}) {
-  const { timeout = 60000, pollMs = 500 } = opts;
+  const {
+    timeout = 60000,
+    pollMs = 500,
+    autoClick = true,
+    useSolver = !!(process.env.TWOCAPTCHA_KEY || process.env.CAPSOLVER_KEY),
+  } = opts;
   const deadline = Date.now() + timeout;
+  let clicked = false;
+  let solved = false;
 
   const isCloudflareWall = async () => {
     try {
@@ -132,7 +286,8 @@ async function waitForCloudflare(page, opts = {}) {
         lower.includes('cf-challenge-running') ||
         lower.includes('challenge-platform') ||
         lower.includes('checking your browser') ||
-        lower.includes('please wait while we verify')
+        lower.includes('please wait while we verify') ||
+        lower.includes('cf-turnstile')
       );
     } catch {
       return false;
@@ -141,6 +296,22 @@ async function waitForCloudflare(page, opts = {}) {
 
   while (Date.now() < deadline) {
     if (!(await isCloudflareWall())) return true;
+
+    if (autoClick && !clicked) {
+      const did = await clickTurnstile(page, { timeout: 3000 });
+      if (did) {
+        clicked = true;
+        await sleep(2000); // give CF a moment to validate
+        continue;
+      }
+    }
+
+    if (useSolver && !solved && clicked) {
+      // Solver only needed if click alone didn't pass
+      const ok = await solveTurnstileWithService(page).catch(() => false);
+      if (ok) solved = true;
+    }
+
     await sleep(pollMs);
   }
   return false;
@@ -151,10 +322,12 @@ async function gotoBypass(page, url, opts = {}) {
   const {
     waitUntil = 'domcontentloaded',
     cfTimeout = 60000,
+    autoClick = true,
+    useSolver,
     ...gotoOpts
   } = opts;
   const resp = await page.goto(url, { waitUntil, ...gotoOpts });
-  await waitForCloudflare(page, { timeout: cfTimeout });
+  await waitForCloudflare(page, { timeout: cfTimeout, autoClick, useSolver });
   return resp;
 }
 
@@ -165,6 +338,8 @@ module.exports = {
   context,
   waitForCloudflare,
   gotoBypass,
+  clickTurnstile,
+  solveTurnstileWithService,
   REALISTIC_UA,
   DEFAULT_ARGS,
 };

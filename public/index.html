@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Playwright API</title>
+<style>
+  :root {
+    --bg: #0b0e14;
+    --panel: #131722;
+    --panel-2: #1a1f2e;
+    --border: #2a3142;
+    --text: #e6e6e6;
+    --muted: #8a91a8;
+    --accent: #7aa2f7;
+    --good: #9ece6a;
+    --warn: #e0af68;
+    --bad: #f7768e;
+    --code: #bb9af7;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #fafafa; --panel: #ffffff; --panel-2: #f5f5f7; --border: #e3e3e8;
+      --text: #1a1a1a; --muted: #6a6a72; --accent: #2563eb; --good: #16a34a;
+      --warn: #d97706; --bad: #dc2626; --code: #7c3aed;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text); font: 14px/1.55 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    min-height: 100vh; padding: 32px 16px 80px;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; }
+  header {
+    display: flex; align-items: center; gap: 16px; margin-bottom: 28px;
+    padding-bottom: 20px; border-bottom: 1px solid var(--border);
+  }
+  .logo {
+    width: 44px; height: 44px; border-radius: 10px;
+    background: linear-gradient(135deg, #7aa2f7, #bb9af7); flex-shrink: 0;
+    display: grid; place-items: center; color: #fff; font-weight: 700; font-size: 22px;
+  }
+  h1 { font-size: 22px; margin: 0 0 2px; }
+  .sub { color: var(--muted); font-size: 13px; }
+  .status-pill {
+    margin-left: auto; padding: 6px 12px; border-radius: 999px; font-size: 12px;
+    background: var(--panel); border: 1px solid var(--border); display: flex; align-items: center; gap: 8px;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .dot.ok { background: var(--good); box-shadow: 0 0 8px var(--good); }
+  .grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); margin-bottom: 16px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 18px; overflow: hidden;
+  }
+  .card h2 {
+    font-size: 13px; font-weight: 600; margin: 0 0 12px; text-transform: uppercase;
+    letter-spacing: 0.06em; color: var(--muted);
+  }
+  .kv { display: grid; grid-template-columns: 1fr auto; gap: 6px 14px; font-size: 13px; }
+  .kv > div:nth-child(odd) { color: var(--muted); }
+  .kv > div:nth-child(even) { font-variant-numeric: tabular-nums; word-break: break-all; }
+  pre, code {
+    font-family: ui-monospace, 'JetBrains Mono', 'SF Mono', Menlo, monospace;
+    font-size: 12.5px;
+  }
+  pre {
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 14px; margin: 0; overflow-x: auto; line-height: 1.6;
+  }
+  code.inline { background: var(--panel-2); padding: 2px 6px; border-radius: 4px; color: var(--code); }
+  .endpoint {
+    display: flex; align-items: center; gap: 12px; padding: 10px 12px;
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px;
+    margin-bottom: 8px; font-size: 13px;
+  }
+  .endpoint:last-child { margin-bottom: 0; }
+  .method {
+    font-weight: 700; font-size: 11px; padding: 3px 7px; border-radius: 4px;
+    background: var(--accent); color: #fff; min-width: 44px; text-align: center;
+  }
+  .method.post { background: var(--good); }
+  .ep-path { font-family: ui-monospace, monospace; color: var(--text); }
+  .ep-desc { color: var(--muted); margin-left: auto; font-size: 12.5px; }
+  .tabs { display: flex; gap: 4px; margin-bottom: 12px; flex-wrap: wrap; }
+  .tab {
+    padding: 6px 12px; font-size: 12px; border-radius: 6px; cursor: pointer;
+    border: 1px solid var(--border); background: var(--panel-2); color: var(--muted);
+  }
+  .tab.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
+  .copy-btn {
+    position: absolute; top: 10px; right: 10px; font-size: 11px; padding: 4px 8px;
+    background: var(--panel); border: 1px solid var(--border); color: var(--muted);
+    border-radius: 4px; cursor: pointer;
+  }
+  .copy-btn:hover { color: var(--text); }
+  .pre-wrap { position: relative; }
+  details { margin-top: 8px; }
+  summary { cursor: pointer; color: var(--muted); font-size: 13px; padding: 4px 0; }
+  summary:hover { color: var(--text); }
+  details[open] summary { color: var(--text); margin-bottom: 8px; }
+  .tag {
+    display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px;
+    background: var(--panel-2); border: 1px solid var(--border); color: var(--muted);
+    margin: 2px 4px 2px 0;
+  }
+  .tag.good { color: var(--good); border-color: var(--good); }
+  .tag.warn { color: var(--warn); border-color: var(--warn); }
+  ul.clean { list-style: none; padding: 0; margin: 0; }
+  ul.clean li { padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+  ul.clean li:last-child { border-bottom: none; }
+  ul.clean li code.inline { font-size: 11.5px; }
+  footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 40px; }
+  .skeleton { background: var(--panel-2); border-radius: 4px; height: 14px; animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity: 0.6; } 50% { opacity: 0.3; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo">P</div>
+    <div>
+      <h1>Playwright API</h1>
+      <div class="sub">Public Playwright execution API — POST your JS, get the result.</div>
+    </div>
+    <div class="status-pill"><span class="dot" id="status-dot"></span><span id="status-text">checking…</span></div>
+  </header>
+
+  <div class="grid">
+    <div class="card">
+      <h2>Service</h2>
+      <div class="kv" id="kv-service"><div class="skeleton" style="grid-column:1/3"></div></div>
+    </div>
+    <div class="card">
+      <h2>Runtime</h2>
+      <div class="kv" id="kv-runtime"><div class="skeleton" style="grid-column:1/3"></div></div>
+    </div>
+    <div class="card">
+      <h2>Host</h2>
+      <div class="kv" id="kv-host"><div class="skeleton" style="grid-column:1/3"></div></div>
+    </div>
+    <div class="card">
+      <h2>Process</h2>
+      <div class="kv" id="kv-process"><div class="skeleton" style="grid-column:1/3"></div></div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-bottom:16px">
+    <h2>Endpoints</h2>
+    <div id="endpoints">
+      <div class="endpoint"><span class="method">GET</span><span class="ep-path">/</span><span class="ep-desc">this page</span></div>
+      <div class="endpoint"><span class="method">GET</span><span class="ep-path">/api/info</span><span class="ep-desc">JSON service info</span></div>
+      <div class="endpoint"><span class="method">GET</span><span class="ep-path">/health</span><span class="ep-desc">liveness probe</span></div>
+      <div class="endpoint"><span class="method post">POST</span><span class="ep-path">/run</span><span class="ep-desc">execute Playwright code</span></div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-bottom:16px">
+    <h2>Quick start</h2>
+    <div class="tabs" id="ex-tabs">
+      <div class="tab active" data-ex="curl">curl</div>
+      <div class="tab" data-ex="js">node / fetch</div>
+      <div class="tab" data-ex="axios">axios (CJS)</div>
+      <div class="tab" data-ex="cf">stealth + Cloudflare</div>
+      <div class="tab" data-ex="esm">ESM (top-level await)</div>
+    </div>
+    <div class="pre-wrap">
+      <button class="copy-btn" onclick="copyExample()">copy</button>
+      <pre id="example-code"></pre>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h2>Stealth helper</h2>
+      <div style="font-size:13px;color:var(--muted);margin-bottom:10px">
+        Available as <code class="inline">require('stealth')</code> in user code.
+      </div>
+      <ul class="clean" id="stealth-api"></ul>
+      <details>
+        <summary>What it bypasses</summary>
+        <div id="stealth-bypasses"></div>
+      </details>
+      <details>
+        <summary>Caveats</summary>
+        <div id="stealth-caveats" style="font-size:12.5px;color:var(--muted);"></div>
+      </details>
+    </div>
+
+    <div class="card">
+      <h2>Hardening</h2>
+      <div id="hardening-summary" style="font-size:13px;color:var(--muted);margin-bottom:10px"></div>
+      <div class="kv" id="kv-hardening"></div>
+      <details>
+        <summary>Burn steps on each request</summary>
+        <ul class="clean" id="burn-steps"></ul>
+      </details>
+    </div>
+
+    <div class="card">
+      <h2>Browsers &amp; fonts</h2>
+      <div class="kv" id="kv-browsers"></div>
+      <details>
+        <summary>Bundled fonts</summary>
+        <div id="fonts-list" style="margin-top:8px"></div>
+      </details>
+    </div>
+
+    <div class="card">
+      <h2>Limits</h2>
+      <div class="kv" id="kv-limits"></div>
+    </div>
+  </div>
+
+  <footer>
+    bun + playwright on Hugging Face Spaces · <a href="/api/info" style="color:var(--accent)">raw JSON</a> · <a href="/health" style="color:var(--accent)">health</a>
+  </footer>
+</div>
+
+<script>
+const EXAMPLES = {
+  curl: `curl -X POST $URL/run \\\\
+  -H "Content-Type: application/json" \\\\
+  -d '{"code":"const { chromium } = require(\\"playwright\\");\\\\n(async () => {\\\\n  const b = await chromium.launch({ headless: true });\\\\n  const p = await b.newPage();\\\\n  await p.goto(\\"https://example.com\\");\\\\n  console.log(await p.title());\\\\n  await b.close();\\\\n})();"}'`,
+  js: `const code = \`
+const { chromium } = require('playwright');
+(async () => {
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  await page.goto('https://example.com');
+  console.log(await page.title());
+  await browser.close();
+})();
+\`;
+
+const r = await fetch('$URL/run', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ code }),
+});
+const data = await r.json();
+console.log(data.output);`,
+  axios: `const axios = require('axios');
+
+class PlaywrightDownloader {
+  constructor() {
+    this.url = '$URL/run';
+  }
+  async search({ query }) {
+    const code = \`
+      const { chromium } = require('playwright');
+      (async () => {
+        const browser = await chromium.launch({ headless: true });
+        const page = await browser.newPage();
+        await page.goto('https://sfile.mobi/search.php?q=\${query}&search=Search');
+        const results = await page.\\$\\$eval('.list', items =>
+          items.map(item => {
+            const name = item.querySelector('a')?.textContent.trim();
+            const link = item.querySelector('a')?.getAttribute('href');
+            const size = item.textContent.split('(')[1]?.split(')')[0]?.trim() || 'Unknown';
+            return name && link ? { name, link, size } : null;
+          }).filter(Boolean)
+        );
+        console.log(results);
+        await browser.close();
+      })();
+    \`;
+    const { data } = await axios.post(this.url, { code });
+    return JSON.parse(data.output);
+  }
+}`,
+  cf: `// Bypass passive Cloudflare 'Please wait a moment...' interstitial.
+const stealth = require('stealth');
+
+(async () => {
+  const browser = await stealth.launch({ channel: 'chrome' }); // real Chrome
+  const ctx = await stealth.context(browser);
+  const page = await ctx.newPage();
+
+  await stealth.gotoBypass(page, 'https://target-with-cf.com', {
+    cfTimeout: 60000,
+  });
+
+  console.log('Title:', await page.title());
+  console.log('Body length:', (await page.content()).length);
+
+  await browser.close();
+})();`,
+  esm: `// ESM with top-level await — auto-detected from \`import\`
+import { chromium } from 'playwright';
+
+const browser = await chromium.launch({ headless: true });
+const page = await browser.newPage();
+await page.goto('https://example.com');
+console.log(await page.title());
+await browser.close();`,
+};
+
+const $ = (id) => document.getElementById(id);
+const fmtNum = (n) => typeof n === 'number' ? n.toLocaleString() : n;
+
+function setKV(el, pairs) {
+  el.innerHTML = '';
+  for (const [k, v] of pairs) {
+    if (v === undefined || v === null) continue;
+    const dk = document.createElement('div'); dk.textContent = k;
+    const dv = document.createElement('div'); dv.textContent = v;
+    el.appendChild(dk); el.appendChild(dv);
+  }
+}
+
+function showExample(key) {
+  const url = window.location.origin;
+  $('example-code').textContent = (EXAMPLES[key] || '').replaceAll('$URL', url);
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.ex === key));
+}
+
+window.copyExample = function () {
+  navigator.clipboard.writeText($('example-code').textContent).then(() => {
+    const btn = document.querySelector('.copy-btn');
+    const orig = btn.textContent; btn.textContent = 'copied!';
+    setTimeout(() => btn.textContent = orig, 1200);
+  });
+};
+
+document.querySelectorAll('.tab').forEach(t => {
+  t.addEventListener('click', () => showExample(t.dataset.ex));
+});
+showExample('curl');
+
+(async () => {
+  try {
+    const r = await fetch('/api/info');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+
+    $('status-dot').classList.add('ok');
+    $('status-text').textContent = 'online';
+
+    setKV($('kv-service'), [
+      ['Service', d.service],
+      ['Version', d.version],
+      ['Status', d.status],
+      ['Time', new Date(d.timestamp).toLocaleString()],
+    ]);
+    setKV($('kv-runtime'), [
+      ['Server', d.runtime?.server],
+      ['User code', d.runtime?.userCode],
+      ['Platform', d.runtime?.platform + ' ' + d.runtime?.arch],
+      ['PID', d.runtime?.pid],
+    ]);
+    setKV($('kv-host'), [
+      ['Hostname', d.host?.hostname],
+      ['CPUs', d.host?.cpus],
+      ['Total memory', d.host?.totalMemMB ? fmtNum(d.host.totalMemMB) + ' MB' : null],
+      ['Free memory', d.host?.freeMemMB ? fmtNum(d.host.freeMemMB) + ' MB' : null],
+      ['Load avg', d.host?.loadAvg?.map(n => n.toFixed(2)).join(' / ')],
+    ]);
+    setKV($('kv-process'), [
+      ['Started at', d.process?.startedAt ? new Date(d.process.startedAt).toLocaleString() : null],
+      ['Uptime', d.process?.uptimeSec ? fmtNum(d.process.uptimeSec) + ' s' : null],
+      ['Active requests', d.process?.activeRequests],
+      ['RSS', d.process?.memory?.rssMB ? fmtNum(d.process.memory.rssMB) + ' MB' : null],
+      ['Heap', d.process?.memory?.heapUsedMB ? fmtNum(d.process.memory.heapUsedMB) + ' / ' + fmtNum(d.process.memory.heapTotalMB) + ' MB' : null],
+    ]);
+
+    if (d.stealth) {
+      const apiList = $('stealth-api');
+      apiList.innerHTML = '';
+      for (const [k, v] of Object.entries(d.stealth.api || {})) {
+        const li = document.createElement('li');
+        li.innerHTML = '<code class="inline">' + k.replace(/</g, '&lt;') + '</code><br><span style="color:var(--muted);font-size:12px">' + v + '</span>';
+        apiList.appendChild(li);
+      }
+      const byp = $('stealth-bypasses');
+      byp.innerHTML = '';
+      for (const [k, v] of Object.entries(d.stealth.bypasses || {})) {
+        const tag = document.createElement('div');
+        tag.style.cssText = 'font-size:12.5px;padding:4px 0;';
+        tag.innerHTML = '<code class="inline">' + k + '</code> <span style="color:var(--muted)">— ' + v + '</span>';
+        byp.appendChild(tag);
+      }
+      $('stealth-caveats').textContent = d.stealth.caveats || '';
+    }
+
+    if (d.hardening) {
+      $('hardening-summary').textContent = d.hardening.summary || '';
+      setKV($('kv-hardening'), [
+        ['setpriv (no-new-privs)', d.hardening.setpriv ? 'enabled' : 'disabled'],
+        ['env stripped', d.hardening.envStripped ? 'yes' : 'no'],
+        ['per-request workspace', d.hardening.perRequestWorkspace],
+        ['umask', d.hardening.umask],
+        ['burn on complete', d.hardening.burnOnComplete ? 'yes' : 'no'],
+        ['cross-request isolation', d.hardening.isolationPerRequest ? 'yes' : 'no'],
+      ]);
+      const burn = $('burn-steps');
+      burn.innerHTML = '';
+      (d.hardening.burnSteps || []).forEach(s => {
+        const li = document.createElement('li');
+        li.innerHTML = '<code class="inline">' + s.split('—')[0].trim() + '</code><br><span style="color:var(--muted);font-size:12px">' + (s.split('—')[1]?.trim() || '') + '</span>';
+        burn.appendChild(li);
+      });
+    }
+
+    if (d.playwright) {
+      setKV($('kv-browsers'), [
+        ['Playwright', d.playwright.packageVersion],
+        ['Chromium', d.playwright.browsers?.chromium],
+        ['Firefox', d.playwright.browsers?.firefox],
+        ['WebKit', d.playwright.browsers?.webkit],
+        ['Chrome', d.playwright.browsers?.chrome],
+        ['Xvfb', d.playwright.xvfb],
+      ]);
+      const fontsEl = $('fonts-list');
+      fontsEl.innerHTML = '';
+      (d.playwright.fonts || []).forEach(f => {
+        const t = document.createElement('span'); t.className = 'tag'; t.textContent = f;
+        fontsEl.appendChild(t);
+      });
+    }
+
+    if (d.timeout) {
+      setKV($('kv-limits'), [
+        ['Per-request timeout', d.timeout.perRequestHuman],
+        ['Heartbeat interval', d.request?.longRunningSupport ? '30 s' : null],
+        ['Concurrency', 'unlimited'],
+        ['Body / output size', 'unlimited'],
+      ]);
+    }
+  } catch (e) {
+    $('status-dot').style.background = 'var(--bad)';
+    $('status-text').textContent = 'offline';
+    $('kv-service').innerHTML = '<div style="grid-column:1/3;color:var(--bad)">' + e.message + '</div>';
+  }
+})();
+</script>
+</body>
+</html>

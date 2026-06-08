@@ -336,9 +336,10 @@ function infoPayload() {
       },
     },
     endpoints: [
-      { method: "GET",  path: "/",       desc: "this info page" },
-      { method: "GET",  path: "/health", desc: "liveness probe" },
-      { method: "POST", path: "/run",    desc: "execute Playwright code", body: { code: "string (CJS or ESM)" } },
+      { method: "GET",  path: "/",         desc: "HTML landing page" },
+      { method: "GET",  path: "/api/info", desc: "this JSON info" },
+      { method: "GET",  path: "/health",   desc: "liveness probe" },
+      { method: "POST", path: "/run",      desc: "execute Playwright code", body: { code: "string (CJS or ESM)" } },
     ],
     request: {
       method: "POST",
@@ -424,21 +425,28 @@ function infoPayload() {
         "stealth.launch(opts)": "launch chromium with stealth plugin + anti-detect args",
         "stealth.launch({ channel: 'chrome' })": "launch real Google Chrome (Widevine DRM)",
         "stealth.context(browser, opts)": "context with realistic UA, viewport, locale, plugin shims",
-        "stealth.gotoBypass(page, url)": "navigate + auto-wait for Cloudflare 'Just a moment' challenge",
-        "stealth.waitForCloudflare(page)": "standalone wait for CF interstitial to clear",
+        "stealth.gotoBypass(page, url, { autoClick, useSolver, cfTimeout })": "navigate + auto-handle CF challenge (passive wait + Turnstile click + optional solver)",
+        "stealth.waitForCloudflare(page, opts)": "standalone wait + click + optional solver",
+        "stealth.clickTurnstile(page)": "click 'Verify you are human' / Turnstile checkbox if present",
+        "stealth.solveTurnstileWithService(page)": "use 2captcha/capsolver if TWOCAPTCHA_KEY/CAPSOLVER_KEY env is set",
       },
       bypasses: {
         "navigator.webdriver": "removed",
-        "navigator.plugins/languages": "spoofed to look like real browser",
+        "navigator.plugins/languages": "spoofed",
         "window.chrome": "stub injected",
         "AutomationControlled flag": "disabled",
-        "Cloudflare 'Please wait a moment'": "auto-wait + retry until cleared",
+        "Cloudflare 'Just a moment'": "passive wait + auto-pass",
+        "Cloudflare Turnstile checkbox": "auto-clicked (works if CF accepts the fingerprint)",
+        "Image CAPTCHA fallback": "pluggable via TWOCAPTCHA_KEY or CAPSOLVER_KEY env (paid services)",
       },
-      caveats: "Cloudflare Turnstile (interactive) and CF Bot Management (ML-based) usually still block. Use a CAPTCHA solver service (capsolver/2captcha) for those — not included by default.",
-      example: "const stealth = require('stealth');\nconst browser = await stealth.launch();\nconst ctx = await stealth.context(browser);\nconst page = await ctx.newPage();\nawait stealth.gotoBypass(page, 'https://protected-site.com');\nconsole.log(await page.title());\nawait browser.close();",
+      caveats: "Auto-click works for 'soft' Turnstile (where checkbox click is enough). If CF spawns an image challenge or behavioral analysis, only a paid solver service can pass it. Set TWOCAPTCHA_KEY or CAPSOLVER_KEY env on the Space to enable that path.",
+      example: "const stealth = require('stealth');\nconst browser = await stealth.launch({ channel: 'chrome' });\nconst ctx = await stealth.context(browser);\nconst page = await ctx.newPage();\nawait stealth.gotoBypass(page, 'https://protected-site.com');\nconsole.log(await page.title());\nawait browser.close();",
     },
   };
 }
+
+const PUBLIC_DIR = "/app/public";
+const INDEX_HTML_FILE = Bun.file(`${PUBLIC_DIR}/index.html`);
 
 const server = Bun.serve({
   port: PORT,
@@ -449,6 +457,16 @@ const server = Bun.serve({
     const url = new URL(req.url);
 
     if (req.method === "GET" && url.pathname === "/") {
+      try {
+        return new Response(INDEX_HTML_FILE, {
+          status: 200,
+          headers: { "Content-Type": "text/html; charset=utf-8" },
+        });
+      } catch {
+        return jsonResponse(200, infoPayload());
+      }
+    }
+    if (req.method === "GET" && url.pathname === "/api/info") {
       return jsonResponse(200, infoPayload());
     }
     if (req.method === "GET" && url.pathname === "/health") {

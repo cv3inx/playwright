@@ -38,6 +38,7 @@ COPY --chown=1000:1000 package.json ./
 RUN bun install --production --ignore-scripts
 
 COPY --chown=1000:1000 helpers/ ./helpers/
+COPY --chown=1000:1000 public/ ./public/
 COPY --chown=1000:1000 server.js ./
 
 EXPOSE 7860
