@@ -24,22 +24,54 @@ const HOSTNAME = (() => {
 
 // Catch any uncaught error so the process logs WHY before exiting — otherwise
 // HF just shows 502 with no clue.
+// ---------- Pretty logging ----------
+const C = {
+  reset: "\x1b[0m",
+  dim:   "\x1b[2m",
+  bold:  "\x1b[1m",
+  red:   "\x1b[31m",
+  green: "\x1b[32m",
+  yellow:"\x1b[33m",
+  blue:  "\x1b[34m",
+  magenta:"\x1b[35m",
+  cyan:  "\x1b[36m",
+  gray:  "\x1b[90m",
+};
+
+function ts() {
+  // 14:23:05.123 — short, sortable, fits the column header
+  return new Date().toISOString().slice(11, 23);
+}
+
+function logLine(tag, tagColor, msg) {
+  process.stdout.write(
+    `${C.gray}${ts()}${C.reset} ${tagColor}${tag.padEnd(5)}${C.reset} ${msg}\n`
+  );
+}
+
+const log = {
+  boot:  (m) => logLine("boot",  C.cyan,    m),
+  info:  (m) => logLine("info",  C.blue,    m),
+  warn:  (m) => logLine("warn",  C.yellow,  m),
+  error: (m) => logLine("error", C.red,     m),
+  fatal: (m) => logLine("FATAL", C.bold + C.red, m),
+};
+
 process.on("uncaughtException", (err) => {
-  console.error("[FATAL] uncaughtException:", err?.stack || err);
+  log.fatal(`uncaughtException: ${err?.stack || err}`);
   process.exit(1);
 });
 process.on("unhandledRejection", (err) => {
-  console.error("[FATAL] unhandledRejection:", err?.stack || err);
+  log.fatal(`unhandledRejection: ${err?.stack || err}`);
   process.exit(1);
 });
 
-console.log(`[boot] bun ${Bun.version}, pid ${process.pid}, port ${PORT}`);
+log.boot(`bun ${Bun.version} · pid ${process.pid} · port ${PORT}`);
 
 try {
   await mkdir(RUNS_DIR, { recursive: true });
 } catch (e) {
-  console.error(`[boot] could not create RUNS_DIR (${RUNS_DIR}):`, e.message);
-  // Try /tmp as fallback so the server still boots
+  log.error(`could not create RUNS_DIR (${RUNS_DIR}): ${e.message}`);
 }
 
 // Anti-miner pattern blocklist — kept on purpose (not a "limit", a security measure).
@@ -681,29 +713,52 @@ let HAS_INDEX_HTML = false;
 try {
   await access(INDEX_HTML_PATH);
   HAS_INDEX_HTML = true;
-  console.log(`[boot] landing page present at ${INDEX_HTML_PATH}`);
+  log.boot(`landing page → ${INDEX_HTML_PATH}`);
 } catch {
-  console.warn(`[boot] no index.html at ${INDEX_HTML_PATH} — / will return JSON instead`);
+  log.warn(`no index.html at ${INDEX_HTML_PATH} — / will return JSON instead`);
 }
 
 // ---------- Request logger ----------
 //
-// Logs every request as a single line:
-//   [2026-06-09T03:14:15.123Z] POST /run                          → 200 (1234ms) ip=1.2.3.4 ua="curl/8.5"
-// /health is skipped (Docker pings it every 30s and would spam the log).
-// 4xx/5xx are highlighted; payload-relevant fields (sitekey/url) are added
-// for the solver endpoints to make debugging easier.
+// Output is tabular so columns line up across rows:
+//   14:23:05.123 200  POST /bypass            12ms  url=https://target.com  ip=1.2.3.4
+//   14:23:08.901 200  POST /run             5678ms  code=2048b type=cjs     ip=1.2.3.4
+//   14:23:20.222 504  POST /solve          45003ms  sitekey=0x4AAAA…        ip=1.2.3.4
+//   14:23:25.555 404  GET  /run                1ms                          ip=1.2.3.4
+//
+// /health, /api/info, /favicon.ico are quiet by default so Docker probes
+// don't spam the log; they're still logged when they return 4xx/5xx.
 const LOG_QUIET_PATHS = new Set(["/health", "/api/info", "/favicon.ico"]);
 
+const METHOD_COLORS = {
+  GET:    C.green,
+  POST:   C.cyan,
+  PUT:    C.yellow,
+  DELETE: C.red,
+  PATCH:  C.magenta,
+};
+
 function colorStatus(status) {
-  if (status >= 500) return `\x1b[31m${status}\x1b[0m`; // red
-  if (status >= 400) return `\x1b[33m${status}\x1b[0m`; // yellow
-  if (status >= 300) return `\x1b[36m${status}\x1b[0m`; // cyan
-  return `\x1b[32m${status}\x1b[0m`; // green
+  if (status >= 500) return `${C.red}${status}${C.reset}`;
+  if (status >= 400) return `${C.yellow}${status}${C.reset}`;
+  if (status >= 300) return `${C.cyan}${status}${C.reset}`;
+  return `${C.green}${status}${C.reset}`;
+}
+
+function colorMethod(method) {
+  const c = METHOD_COLORS[method] || C.gray;
+  return `${c}${method.padEnd(4)}${C.reset}`;
+}
+
+function fmtDuration(ms) {
+  // Right-align in a 7-char column so durations stack visually
+  const s = ms < 1000 ? `${ms}ms`
+          : ms < 60000 ? `${(ms / 1000).toFixed(1)}s`
+          : `${Math.round(ms / 1000)}s`;
+  return s.padStart(7);
 }
 
 function clientIp(req, srv) {
-  // Prefer the network-layer peer; fall back to forwarded headers behind a proxy.
   const peer = srv?.requestIP?.(req)?.address;
   if (peer && peer !== "::1" && peer !== "127.0.0.1") return peer;
   const fwd = req.headers.get("x-forwarded-for");
@@ -713,9 +768,12 @@ function clientIp(req, srv) {
   return peer || "-";
 }
 
+function truncate(s, n) {
+  if (typeof s !== "string") return "";
+  return s.length > n ? s.slice(0, n - 1) + "…" : s;
+}
+
 async function readPayloadHints(req) {
-  // Cheap request-body inspection for log context. Clones the request body
-  // (Bun supports this) so the actual handler can still consume it.
   if (req.method !== "POST") return "";
   const ct = (req.headers.get("content-type") || "").toLowerCase();
   if (!ct.includes("application/json")) return "";
@@ -724,21 +782,26 @@ async function readPayloadHints(req) {
     if (!txt) return "";
     const data = JSON.parse(txt);
     const hints = [];
-    if (data.url) hints.push(`url=${truncate(String(data.url), 60)}`);
-    else if (data.siteurl) hints.push(`siteurl=${truncate(String(data.siteurl), 60)}`);
-    if (data.sitekey) hints.push(`sitekey=${truncate(String(data.sitekey), 16)}`);
+    if (data.url) hints.push(`url=${truncate(String(data.url), 50)}`);
+    else if (data.siteurl) hints.push(`siteurl=${truncate(String(data.siteurl), 50)}`);
+    if (data.sitekey) hints.push(`sitekey=${truncate(String(data.sitekey), 14)}`);
     if (data.return) hints.push(`return=${data.return}`);
     if (data.code) hints.push(`code=${data.code.length}b`);
     if (data.type) hints.push(`type=${data.type}`);
-    return hints.length ? " " + hints.join(" ") : "";
+    return hints.join(" ");
   } catch {
     return "";
   }
 }
 
-function truncate(s, n) {
-  if (typeof s !== "string") return "";
-  return s.length > n ? s.slice(0, n - 1) + "…" : s;
+let _headerPrinted = false;
+function printLogHeader() {
+  if (_headerPrinted) return;
+  _headerPrinted = true;
+  process.stdout.write(
+    `${C.dim}${"time".padEnd(12)} ${"sts".padEnd(3)} ${"method".padEnd(4)} ${"path".padEnd(20)} ${"   dur".padEnd(7)}  ${"hints".padEnd(40)}  ip${C.reset}\n` +
+    `${C.dim}${"─".repeat(12)} ${"─".repeat(3)} ${"─".repeat(4)} ${"─".repeat(20)} ${"─".repeat(7)}  ${"─".repeat(40)}  ─${C.reset}\n`
+  );
 }
 
 async function route(req) {
@@ -809,19 +872,19 @@ const server = Bun.serve({
 
     const ms = Math.round(performance.now() - t0);
     if (!quiet || resp.status >= 400) {
-      const ts = new Date().toISOString();
-      const status = colorStatus(resp.status);
-      const ipPart = ip !== "-" ? ` ip=${ip}` : "";
-      const uaPart = ua ? ` ua="${truncate(ua, 60)}"` : "";
-      console.log(
-        `[${ts}] ${req.method.padEnd(4)} ${path.padEnd(20)} → ${status} (${ms}ms)${hints}${ipPart}${uaPart}`
+      printLogHeader();
+      const hintsPad = truncate(hints, 40).padEnd(40);
+      const pathPad = truncate(path, 20).padEnd(20);
+      process.stdout.write(
+        `${C.gray}${ts()}${C.reset} ${colorStatus(resp.status)} ${colorMethod(req.method)} ${pathPad} ${fmtDuration(ms)}  ${C.dim}${hintsPad}${C.reset}  ${C.gray}${ip}${C.reset}\n`
       );
       if (errored) {
-        console.error(`  └─ error:`, errored?.stack || errored);
+        process.stdout.write(`  ${C.red}└─${C.reset} ${errored?.stack || errored}\n`);
       }
     }
     return resp;
   },
 });
 
-console.log(`Playwright API listening on :${server.port} (setpriv=${SETPRIV_OK})`);
+log.boot(`listening on :${server.port} · setpriv=${SETPRIV_OK} · solver=${SOLVER_URL || "off"}`);
+log.boot(`ready · ${C.dim}GET / for the dashboard${C.reset}`);
