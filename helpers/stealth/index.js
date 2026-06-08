@@ -53,13 +53,31 @@ async function launch(opts = {}) {
     proxy,
     ...rest
   } = opts;
-  return chromium.launch({
-    headless,
-    channel,
-    proxy,
-    args: [...DEFAULT_ARGS, ...args],
-    ...rest,
-  });
+  try {
+    return await chromium.launch({
+      headless,
+      channel,
+      proxy,
+      args: [...DEFAULT_ARGS, ...args],
+      ...rest,
+    });
+  } catch (err) {
+    // Chrome is x86_64-only on Linux. On ARM hosts (AWS Graviton, Oracle
+    // Ampere, Raspberry Pi) the Google .deb is unavailable so this lookup
+    // fails. Fall back to Playwright's bundled chromium silently — user
+    // code shouldn't have to know the host arch.
+    const msg = String(err?.message || '');
+    const fellback = channel && /Chromium distribution|is not found|install chrome/i.test(msg);
+    if (fellback) {
+      return await chromium.launch({
+        headless,
+        proxy,
+        args: [...DEFAULT_ARGS, ...args],
+        ...rest,
+      });
+    }
+    throw err;
+  }
 }
 
 async function launchHeadful(opts = {}) {
